@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-jose/go-jose/v4"
@@ -75,7 +76,7 @@ func serve(handler http.Handler, method, path string) *httptest.ResponseRecorder
 func TestBuildHTTPHandlerAuthDisabled(t *testing.T) {
 	clearAuthEnv(t)
 
-	handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), newReadyHealthHandler(), nil, discardLogger())
+	handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), false, newReadyHealthHandler(), nil, discardLogger())
 	require.NoError(t, err)
 
 	for _, path := range []string{health.LivenessPath, health.ReadinessPath, health.StartupPath} {
@@ -89,7 +90,7 @@ func TestBuildHTTPHandlerHealthBypassesAuth(t *testing.T) {
 	clearAuthEnv(t)
 	enableSentryAuth(t, newJWKSServer(t, http.StatusOK).URL)
 
-	handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), newReadyHealthHandler(), nil, discardLogger())
+	handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), false, newReadyHealthHandler(), nil, discardLogger())
 	require.NoError(t, err)
 
 	for _, path := range []string{health.LivenessPath, health.ReadinessPath, health.StartupPath} {
@@ -104,7 +105,7 @@ func TestBuildHTTPHandlerHybridSentry(t *testing.T) {
 	t.Setenv("AUTH_MODE", string(auth.ModeHybrid))
 	t.Setenv("DAPR_SENTRY_ENABLED", "true")
 
-	handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), newReadyHealthHandler(), nil, discardLogger())
+	handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), false, newReadyHealthHandler(), nil, discardLogger())
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusUnauthorized, serve(handler, http.MethodPost, "/").Code)
 }
@@ -113,7 +114,7 @@ func TestBuildHTTPHandlerCORSFromEnv(t *testing.T) {
 	clearAuthEnv(t)
 	t.Setenv(corsOriginEnv, testOrigin)
 
-	handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), newReadyHealthHandler(), nil, discardLogger())
+	handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), false, newReadyHealthHandler(), nil, discardLogger())
 	require.NoError(t, err)
 
 	assert.Equal(t, testOrigin, serve(handler, http.MethodGet, health.LivenessPath).Header().Get("Access-Control-Allow-Origin"))
@@ -142,7 +143,7 @@ func TestBuildHTTPHandlerErrors(t *testing.T) {
 			clearAuthEnv(t)
 			enableSentryAuth(t, tt.jwksURL(t))
 
-			handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), newReadyHealthHandler(), nil, discardLogger())
+			handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), false, newReadyHealthHandler(), nil, discardLogger())
 			assert.ErrorContains(t, err, tt.wantErr)
 			assert.Nil(t, handler)
 		})
@@ -176,8 +177,58 @@ func TestBuildHTTPHandlerRejectsRemovedSkipPaths(t *testing.T) {
 	enableSentryAuth(t, newJWKSServer(t, http.StatusOK).URL)
 	t.Setenv("AUTH_SKIP_PATHS", "/")
 
-	handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), newReadyHealthHandler(), nil, discardLogger())
+	handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), false, newReadyHealthHandler(), nil, discardLogger())
 
 	require.ErrorIs(t, err, auth.ErrAuthSkipPathsRemoved)
 	assert.Nil(t, handler)
+}
+
+func TestStatelessMode(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		flag bool
+		env  string
+		want bool
+	}{
+		{false, "", false},
+		{true, "", true},
+		{false, "true", true},
+		{false, "TRUE", true},
+		{false, "1", true},
+		{false, "false", false},
+		{false, "yes please", false},
+		{true, "false", true},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, statelessMode(tt.flag, tt.env), "flag=%v env=%q", tt.flag, tt.env)
+	}
+}
+
+// postUnknownSession sends a tools/list request carrying a session ID the server never issued,
+// as a client does after the server restarted.
+func postUnknownSession(t *testing.T, stateless bool) int {
+	t.Helper()
+	clearAuthEnv(t)
+
+	handler, _, err := buildHTTPHandler(context.Background(), newTestMCPServer(), stateless, newReadyHealthHandler(), nil, discardLogger())
+	require.NoError(t, err)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Session-Id", "session-from-before-restart")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// The SDK still emits a Mcp-Session-Id on initialize in stateless mode, so the observable
+// difference is that stateless mode does not validate the ID on later requests.
+func TestBuildHTTPHandlerStatelessAcceptsUnknownSessionID(t *testing.T) {
+	assert.Equal(t, http.StatusOK, postUnknownSession(t, true))
+}
+
+func TestBuildHTTPHandlerStatefulRejectsUnknownSessionID(t *testing.T) {
+	assert.Equal(t, http.StatusNotFound, postUnknownSession(t, false))
 }

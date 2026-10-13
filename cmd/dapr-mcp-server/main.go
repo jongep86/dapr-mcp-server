@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -33,6 +34,7 @@ const (
 	telemetryFlushTimeout = 10 * time.Second
 	logLevelEnv           = "DAPR_MCP_SERVER_LOG_LEVEL"
 	corsOriginEnv         = "DAPR_MCP_CORS_ORIGIN"
+	statelessEnv          = "DAPR_MCP_SERVER_STATELESS"
 	corsAllowMethods      = "GET, POST, PUT, DELETE, OPTIONS"
 	corsAllowHeaders      = "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version"
 	corsExposeHeaders     = "Mcp-Session-Id, Mcp-Protocol-Version"
@@ -46,6 +48,7 @@ var (
 	showVersion     = flag.Bool("version", false, "print the version and exit")
 	healthCheck     = flag.Bool("health-check", false, "run a health check against the running server and exit")
 	healthCheckAddr = flag.String("health-check-addr", "", "host:port probed by --health-check (default: derived from --http, else "+defaultHealthCheckAddr+")")
+	stateless       = flag.Bool("stateless", false, "serve streamable HTTP without server-side sessions (also "+statelessEnv+"=true); clients survive server restarts, but server-to-client notifications are unavailable")
 )
 
 func main() {
@@ -169,7 +172,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return runStdio(ctx, server, &mcp.StdioTransport{})
 	}
 
-	handler, authenticators, err := buildHTTPHandler(ctx, server, healthChecker, httpMetrics, logger)
+	handler, authenticators, err := buildHTTPHandler(ctx, server, statelessMode(*stateless, os.Getenv(statelessEnv)), healthChecker, httpMetrics, logger)
 	if err != nil {
 		return err
 	}
@@ -249,9 +252,19 @@ func corsMiddleware(origin string, next http.Handler) http.Handler {
 	})
 }
 
+// statelessMode reports whether streamable HTTP runs without server-side sessions.
+// The flag wins; otherwise env is parsed as a boolean, and anything unparseable is false.
+func statelessMode(flagValue bool, env string) bool {
+	if flagValue {
+		return true
+	}
+	enabled, err := strconv.ParseBool(env)
+	return err == nil && enabled
+}
+
 // buildHTTPHandler wires the health, subscription and MCP routes, with auth in front of MCP.
 // The returned authenticators hold background resources, so the caller closes them once the server stops.
-func buildHTTPHandler(ctx context.Context, server *mcp.Server, healthChecker *health.Handler, httpMetrics *telemetry.HTTPMetrics, logger *slog.Logger) (http.Handler, []auth.Authenticator, error) {
+func buildHTTPHandler(ctx context.Context, server *mcp.Server, stateless bool, healthChecker *health.Handler, httpMetrics *telemetry.HTTPMetrics, logger *slog.Logger) (http.Handler, []auth.Authenticator, error) {
 	authConfig := auth.DefaultConfig()
 	if err := authConfig.Validate(); err != nil {
 		return nil, nil, fmt.Errorf("invalid authentication configuration: %w", err)
@@ -282,11 +295,11 @@ func buildHTTPHandler(ctx context.Context, server *mcp.Server, healthChecker *he
 		_, _ = w.Write([]byte(`[]`))
 	})
 
-	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{})
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: stateless})
 	// Telemetry is the outer layer so metrics cover every request, including auth failures.
 	mux.Handle("/", telemetry.HTTPMiddleware(authMiddleware(mcpHandler), logger, httpMetrics))
 
-	logger.Info("MCP HTTP server configured", "auth_enabled", authConfig.Enabled())
+	logger.Info("MCP HTTP server configured", "auth_enabled", authConfig.Enabled(), "stateless", stateless)
 	return corsMiddleware(os.Getenv(corsOriginEnv), mux), authenticators, nil
 }
 
