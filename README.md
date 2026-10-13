@@ -73,9 +73,12 @@ export DAPR_MCP_SERVER_WORKFLOW_APPS="orders=localhost:50002,billing=localhost:5
   intentionally down.
 - Every workflow tool takes an `appID` argument. When apps are configured,
   `appID` is **required** on all tools except `list_workflows` (pass the
-  server's own app-id for its sidecar): routing a call to a sidecar that does
-  not own the instance can crash daprd
-  ([dapr/dapr#10217](https://github.com/dapr/dapr/issues/10217)).
+  server's own app-id for its sidecar). Without it, a per-instance call would
+  go to a sidecar that most likely does not own the instance. On a Dapr
+  runtime without [dapr/dapr#10218](https://github.com/dapr/dapr/pull/10218),
+  a workflow history query (`GetInstanceHistory`) against a sidecar that has
+  no actor state store configured makes daprd hit a nil pointer dereference
+  and exit ([dapr/dapr#10217](https://github.com/dapr/dapr/issues/10217)).
 - `list_workflows` without `appID` lists all apps, reports `app_id` per
   instance and `counts_by_app`, and reports an unreachable app as a warning
   instead of failing. `limit` applies per app; continuation tokens are
