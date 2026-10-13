@@ -142,14 +142,24 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	defer daprClient.Close()
 
+	wfApps, err := workflowAppsFromEnv(ctx, logger)
+	if err != nil {
+		return fmt.Errorf("initialize workflow apps: %w", err)
+	}
+	defer wfApps.Close()
+	wfClients := wfApps.workflowClients(daprClient, ownAppID(ctx, daprClient))
+
 	instructions := buildInstructions()
+	if len(wfApps.clients) > 0 {
+		instructions += workflowAppsInstruction(wfApps.appIDs(wfClients.DefaultAppID))
+	}
 	logger.Debug("Server instructions configured", "instructions", instructions)
 
 	server := newMCPServer(instructions)
 
 	healthChecker := health.NewHandler(daprClient, Version, logger)
 
-	if err = registerTools(ctx, server, daprClient, toolMetrics, logger); err != nil {
+	if err = registerTools(ctx, server, daprClient, wfClients, toolMetrics, logger); err != nil {
 		return fmt.Errorf("register tools: %w", err)
 	}
 	healthChecker.SetStartupDone(true)

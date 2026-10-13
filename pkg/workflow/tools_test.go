@@ -23,13 +23,32 @@ import (
 
 var createdAt = time.Date(2026, 7, 14, 6, 0, 0, 0, time.UTC)
 
+const ownAppID = "mcp-server"
+
 func newTestHandler(t *testing.T) (*handler, *mocks.MockWorkflowClient, *bytes.Buffer) {
+	t.Helper()
+	h, def, _, buf := newMultiAppHandler(t)
+	return h, def, buf
+}
+
+func newMultiAppHandler(t *testing.T, appIDs ...string) (*handler, *mocks.MockWorkflowClient, map[string]*mocks.MockWorkflowClient, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	client := new(mocks.MockWorkflowClient)
-	t.Cleanup(func() { client.AssertExpectations(t) })
-	return &handler{client: client, inst: toolkit.Instrumentation{Logger: logger}}, client, &buf
+	def := new(mocks.MockWorkflowClient)
+	pool := make(map[string]WorkflowClient, len(appIDs))
+	byApp := make(map[string]*mocks.MockWorkflowClient, len(appIDs))
+	for _, id := range appIDs {
+		m := new(mocks.MockWorkflowClient)
+		pool[id], byApp[id] = m, m
+	}
+	t.Cleanup(func() {
+		def.AssertExpectations(t)
+		for _, m := range byApp {
+			m.AssertExpectations(t)
+		}
+	})
+	return &handler{clients: newRegistry(def, ownAppID, pool), inst: toolkit.Instrumentation{Logger: logger}}, def, byApp, &buf
 }
 
 func text(t *testing.T, result *mcp.CallToolResult) string {
@@ -79,7 +98,7 @@ func TestGetWorkflowStatus(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, result.IsError)
 		got := text(t, result)
-		assert.Contains(t, got, "Workflow instance 'order-1' (workflow 'order') is FAILED.")
+		assert.Contains(t, got, "Workflow instance 'order-1' (workflow 'order', app 'mcp-server') is FAILED.")
 		assert.Contains(t, got, "Custom status: step 3/3")
 		assert.Contains(t, got, "Failure: boom")
 		s, ok := structured.(map[string]any)
@@ -98,7 +117,7 @@ func TestGetWorkflowStatus(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.True(t, result.IsError)
-		assert.Contains(t, text(t, result), `get status of workflow instance "order-1": not found`)
+		assert.Contains(t, text(t, result), `get status of workflow instance "order-1" on app "mcp-server": not found`)
 	})
 }
 
@@ -117,7 +136,7 @@ func TestGetWorkflowHistory(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
 	got := text(t, result)
-	assert.Contains(t, got, "has 3 history event(s)")
+	assert.Contains(t, got, "Workflow instance 'order-1' on app 'mcp-server' has 3 history event(s):")
 	assert.Contains(t, got, "#0 executionStarted (workflow: order)")
 	assert.Contains(t, got, "#1 taskScheduled (activity: reserve)")
 	assert.Contains(t, got, "#2 taskFailed (error: out of stock)")
@@ -178,10 +197,10 @@ func TestListWorkflows(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, result.IsError)
 		got := text(t, result)
-		assert.Contains(t, got, "Found 2 workflow instance(s).")
+		assert.Contains(t, got, "Found 2 workflow instance(s) on app 'mcp-server'.")
 		assert.Contains(t, got, "Counts by status: COMPLETED=1 RUNNING=1")
-		assert.Contains(t, got, "- o-1 (workflow: order, status: RUNNING)")
-		assert.Contains(t, got, "continuationToken 'page-2'")
+		assert.Contains(t, got, "- o-1 (app: mcp-server, workflow: order, status: RUNNING)")
+		assert.Contains(t, got, "More instances are available on app 'mcp-server': call list_workflows again with appID 'mcp-server' and continuationToken 'page-2'.")
 		s, ok := structured.(map[string]any)
 		require.True(t, ok)
 		assert.Equal(t, "page-2", s["continuation_token"])
@@ -197,7 +216,7 @@ func TestListWorkflows(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.False(t, result.IsError)
-		assert.Contains(t, text(t, result), "Found 0 workflow instance(s).")
+		assert.Contains(t, text(t, result), "Found 0 workflow instance(s) on app 'mcp-server'.")
 		s, ok := structured.(map[string]any)
 		require.True(t, ok)
 		assert.NotNil(t, s["instances"], "instances is serialized as [], not null")
@@ -212,7 +231,7 @@ func TestListWorkflows(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.True(t, result.IsError)
-		assert.Contains(t, text(t, result), "list workflow instances: down")
+		assert.Contains(t, text(t, result), `list workflow instances on app "mcp-server": down`)
 	})
 }
 
@@ -229,11 +248,11 @@ func TestListWorkflowsSkipsUnfetchableInstances(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
 	got := text(t, result)
-	assert.Contains(t, got, "Found 1 workflow instance(s).")
-	assert.Contains(t, got, "WARNING: metadata of 1 instance(s) could not be fetched; they are missing from this list.")
+	assert.Contains(t, got, "Found 1 workflow instance(s) on app 'mcp-server'.")
+	assert.Contains(t, got, "WARNING (app 'mcp-server'): metadata of 1 instance(s) could not be fetched; they are missing")
 	s, ok := structured.(map[string]any)
 	require.True(t, ok)
-	assert.Contains(t, s, "warning")
+	assert.Equal(t, map[string]string{"mcp-server": "metadata of 1 instance(s) could not be fetched; they are missing"}, s["warnings"])
 }
 
 func TestStartWorkflowSendsRawInputAndDoesNotLogIt(t *testing.T) {
@@ -254,7 +273,7 @@ func TestStartWorkflowSendsRawInputAndDoesNotLogIt(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, text(t, result), "Successfully started workflow 'order' with instance ID 'order-1'.")
+	assert.Contains(t, text(t, result), "Successfully started workflow 'order' with instance ID 'order-1' on app 'mcp-server'.")
 	s, ok := structured.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "order-1", s["instance_id"])
@@ -277,7 +296,7 @@ func TestStartWorkflowSchedulesAtStartTime(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Contains(t, text(t, result), "to start at 2026-07-14T06:00:00Z")
+	assert.Contains(t, text(t, result), "to start at 2026-07-14T06:00:00Z on app 'mcp-server'.")
 	s, ok := structured.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "2026-07-14T06:00:00Z", s["start_time"])
@@ -308,7 +327,7 @@ func TestStartWorkflowDaprFailure(t *testing.T) {
 	result, _, err := h.startWorkflow(context.Background(), &mcp.CallToolRequest{}, StartWorkflowArgs{WorkflowName: "order"})
 	require.NoError(t, err)
 	assert.True(t, result.IsError)
-	assert.Contains(t, text(t, result), `start workflow "order": not registered`)
+	assert.Contains(t, text(t, result), `start workflow "order" on app "mcp-server": not registered`)
 }
 
 func TestRerunWorkflow(t *testing.T) {
@@ -328,7 +347,7 @@ func TestRerunWorkflow(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.False(t, result.IsError)
-	assert.Contains(t, text(t, result), "from event 4 as new instance 'order-1-rerun'")
+	assert.Contains(t, text(t, result), "from event 4 as new instance 'order-1-rerun' on app 'mcp-server'.")
 	s, ok := structured.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "order-1-rerun", s["new_instance_id"])
@@ -365,7 +384,7 @@ func TestRaiseWorkflowEvent(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.False(t, result.IsError)
-		assert.Contains(t, text(t, result), "Successfully raised event 'approval' for workflow instance 'order-1'.")
+		assert.Contains(t, text(t, result), "Successfully raised event 'approval' for workflow instance 'order-1' on app 'mcp-server'.")
 		assert.NotContains(t, logs.String(), "sensitive-name")
 	})
 
@@ -395,32 +414,32 @@ func TestInstanceActionTools(t *testing.T) {
 			call: func(h *handler) (*mcp.CallToolResult, any, error) {
 				return h.pauseWorkflow(context.Background(), &mcp.CallToolRequest{}, ReasonArgs{InstanceID: "order-1", Reason: "maintenance"})
 			},
-			wantText: "Successfully paused workflow instance 'order-1'.", wantStatus: "SUSPENDED",
-			wantFail: `pause workflow instance "order-1": boom`,
+			wantText: "Successfully paused workflow instance 'order-1' on app 'mcp-server'.", wantStatus: "SUSPENDED",
+			wantFail: `pause workflow instance "order-1" on app "mcp-server": boom`,
 		},
 		{
 			name: "resume", method: "ResumeWorkflow", mockArgs: []any{mock.Anything, "order-1", ""},
 			call: func(h *handler) (*mcp.CallToolResult, any, error) {
 				return h.resumeWorkflow(context.Background(), &mcp.CallToolRequest{}, ReasonArgs{InstanceID: "order-1"})
 			},
-			wantText: "Successfully resumed workflow instance 'order-1'.", wantStatus: "RUNNING",
-			wantFail: `resume workflow instance "order-1": boom`,
+			wantText: "Successfully resumed workflow instance 'order-1' on app 'mcp-server'.", wantStatus: "RUNNING",
+			wantFail: `resume workflow instance "order-1" on app "mcp-server": boom`,
 		},
 		{
 			name: "terminate", method: "TerminateWorkflow", mockArgs: []any{mock.Anything, "order-1", mock.Anything},
 			call: func(h *handler) (*mcp.CallToolResult, any, error) {
 				return h.terminateWorkflow(context.Background(), &mcp.CallToolRequest{}, InstanceArgs{InstanceID: "order-1"})
 			},
-			wantText: "Successfully requested termination of workflow instance 'order-1'.", wantStatus: "TERMINATED",
-			wantFail: `terminate workflow instance "order-1": boom`,
+			wantText: "Successfully requested termination of workflow instance 'order-1' on app 'mcp-server'.", wantStatus: "TERMINATED",
+			wantFail: `terminate workflow instance "order-1" on app "mcp-server": boom`,
 		},
 		{
 			name: "purge", method: "PurgeWorkflowState", mockArgs: []any{mock.Anything, "order-1", mock.Anything},
 			call: func(h *handler) (*mcp.CallToolResult, any, error) {
 				return h.purgeWorkflow(context.Background(), &mcp.CallToolRequest{}, InstanceArgs{InstanceID: "order-1"})
 			},
-			wantText: "Successfully purged the state of workflow instance 'order-1'.",
-			wantFail: `purge workflow instance "order-1": boom`,
+			wantText: "Successfully purged the state of workflow instance 'order-1' on app 'mcp-server'.",
+			wantFail: `purge workflow instance "order-1" on app "mcp-server": boom`,
 		},
 	}
 	for _, tt := range tests {
@@ -472,4 +491,150 @@ func TestMutatingToolsRequireInstanceID(t *testing.T) {
 		assert.True(t, result.IsError, name)
 		assert.Contains(t, text(t, result), "instanceID", name)
 	}
+}
+
+func TestPerInstanceToolsRequireAppIDInMultiAppMode(t *testing.T) {
+	t.Parallel()
+	h, _, _, _ := newMultiAppHandler(t, "billing") // no expectations: no sidecar may be called
+	ctx, req := context.Background(), &mcp.CallToolRequest{}
+	calls := map[string]func() (*mcp.CallToolResult, any, error){
+		"start": func() (*mcp.CallToolResult, any, error) {
+			return h.startWorkflow(ctx, req, StartWorkflowArgs{WorkflowName: "order"})
+		},
+		"status": func() (*mcp.CallToolResult, any, error) {
+			return h.getWorkflowStatus(ctx, req, InstanceArgs{InstanceID: "o-1"})
+		},
+		"history": func() (*mcp.CallToolResult, any, error) {
+			return h.getWorkflowHistory(ctx, req, InstanceArgs{InstanceID: "o-1"})
+		},
+		"rerun": func() (*mcp.CallToolResult, any, error) {
+			return h.rerunWorkflow(ctx, req, RerunWorkflowArgs{InstanceID: "o-1", EventID: 1})
+		},
+		"pause": func() (*mcp.CallToolResult, any, error) {
+			return h.pauseWorkflow(ctx, req, ReasonArgs{InstanceID: "o-1"})
+		},
+		"resume": func() (*mcp.CallToolResult, any, error) {
+			return h.resumeWorkflow(ctx, req, ReasonArgs{InstanceID: "o-1"})
+		},
+		"terminate": func() (*mcp.CallToolResult, any, error) {
+			return h.terminateWorkflow(ctx, req, InstanceArgs{InstanceID: "o-1"})
+		},
+		"raise": func() (*mcp.CallToolResult, any, error) {
+			return h.raiseWorkflowEvent(ctx, req, RaiseWorkflowEventArgs{InstanceID: "o-1", EventName: "e"})
+		},
+		"purge": func() (*mcp.CallToolResult, any, error) {
+			return h.purgeWorkflow(ctx, req, InstanceArgs{InstanceID: "o-1"})
+		},
+	}
+	for name, call := range calls {
+		result, _, err := call()
+		require.NoError(t, err, name)
+		assert.True(t, result.IsError, name)
+		assert.Contains(t, text(t, result), "appID is required because multiple workflow apps are configured; pass one of: billing, mcp-server", name)
+	}
+}
+
+func TestPerInstanceToolsRouteByAppID(t *testing.T) {
+	t.Parallel()
+	h, _, byApp, _ := newMultiAppHandler(t, "billing")
+	byApp["billing"].On("TerminateWorkflow", mock.Anything, "inv-1", mock.Anything).Return(nil)
+
+	result, structured, err := h.terminateWorkflow(context.Background(), &mcp.CallToolRequest{}, InstanceArgs{AppID: "billing", InstanceID: "inv-1"})
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, text(t, result), "on app 'billing'")
+	s, ok := structured.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "billing", s["app_id"])
+}
+
+func TestUnknownAppIDListsConfiguredApps(t *testing.T) {
+	t.Parallel()
+	h, _, _, _ := newMultiAppHandler(t, "billing")
+	result, _, err := h.getWorkflowStatus(context.Background(), &mcp.CallToolRequest{}, InstanceArgs{AppID: "shipping", InstanceID: "s-1"})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, text(t, result), "unknown appID 'shipping'; configured app-ids: billing, mcp-server")
+}
+
+func TestListWorkflowsFanOut(t *testing.T) {
+	t.Parallel()
+	h, def, byApp, _ := newMultiAppHandler(t, "billing", "shipping")
+	def.On("ListInstanceIDs", mock.Anything, mock.Anything).Return(idList("", "o-1"), nil)
+	def.On("FetchWorkflowMetadata", mock.Anything, "o-1", mock.Anything).
+		Return(metadata("o-1", "order", protos.OrchestrationStatus_ORCHESTRATION_STATUS_RUNNING), nil)
+	byApp["billing"].On("ListInstanceIDs", mock.Anything, mock.Anything).Return(idList("next", "inv-1"), nil)
+	byApp["billing"].On("FetchWorkflowMetadata", mock.Anything, "inv-1", mock.Anything).
+		Return(metadata("inv-1", "invoice", protos.OrchestrationStatus_ORCHESTRATION_STATUS_COMPLETED), nil)
+	byApp["shipping"].On("ListInstanceIDs", mock.Anything, mock.Anything).Return(nil, errors.New("connection refused"))
+
+	result, structured, err := h.listWorkflows(context.Background(), &mcp.CallToolRequest{}, ListWorkflowsArgs{})
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError, "one failing app does not fail the call")
+	got := text(t, result)
+	assert.Contains(t, got, "Found 2 workflow instance(s) across 3 app(s).")
+	assert.Contains(t, got, "Counts by app: billing=1 mcp-server=1")
+	assert.Contains(t, got, "WARNING (app 'shipping'): listing failed, instances of this app are missing: connection refused")
+	assert.Contains(t, got, "appID 'billing' and continuationToken 'next'")
+	s, ok := structured.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, map[string]int{"billing": 1, "mcp-server": 1}, s["counts_by_app"])
+	assert.Equal(t, map[string]string{"billing": "next"}, s["continuation_tokens"])
+	assert.Contains(t, s["warnings"], "shipping")
+}
+
+func TestListWorkflowsFanOutRejectsContinuationToken(t *testing.T) {
+	t.Parallel()
+	h, _, _, _ := newMultiAppHandler(t, "billing")
+	result, _, err := h.listWorkflows(context.Background(), &mcp.CallToolRequest{}, ListWorkflowsArgs{ContinuationToken: "next"})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, text(t, result), "continuationToken requires appID")
+}
+
+func TestListWorkflowsByAppIDListsOnlyThatApp(t *testing.T) {
+	t.Parallel()
+	h, _, byApp, _ := newMultiAppHandler(t, "billing", "shipping") // only billing may be called
+	byApp["billing"].On("ListInstanceIDs", mock.Anything, mock.MatchedBy(func(opts []wf.ListInstanceIDsOptions) bool {
+		req := &protos.ListInstanceIDsRequest{}
+		for _, opt := range opts {
+			require.NoError(t, opt(req))
+		}
+		return req.GetContinuationToken() == "next"
+	})).Return(idList("", "inv-2"), nil)
+	byApp["billing"].On("FetchWorkflowMetadata", mock.Anything, "inv-2", mock.Anything).
+		Return(metadata("inv-2", "invoice", protos.OrchestrationStatus_ORCHESTRATION_STATUS_RUNNING), nil)
+
+	result, structured, err := h.listWorkflows(context.Background(), &mcp.CallToolRequest{}, ListWorkflowsArgs{AppID: "billing", ContinuationToken: "next"})
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	got := text(t, result)
+	assert.Contains(t, got, "Found 1 workflow instance(s) on app 'billing'.")
+	assert.Contains(t, got, "- inv-2 (app: billing, workflow: invoice, status: RUNNING)")
+	s, ok := structured.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "billing", s["app_id"])
+	assert.NotContains(t, s, "counts_by_app")
+}
+
+func TestStartAndRaiseRouteByAppID(t *testing.T) {
+	t.Parallel()
+	h, _, byApp, _ := newMultiAppHandler(t, "billing") // the default client must not be called
+	byApp["billing"].On("ScheduleWorkflow", mock.Anything, "invoice", mock.Anything).Return("inv-1", nil)
+	byApp["billing"].On("RaiseEvent", mock.Anything, "inv-1", "paid", mock.Anything).Return(nil)
+	ctx, req := context.Background(), &mcp.CallToolRequest{}
+
+	started, structured, err := h.startWorkflow(ctx, req, StartWorkflowArgs{AppID: "billing", WorkflowName: "invoice"})
+	require.NoError(t, err)
+	assert.Contains(t, text(t, started), "Successfully started workflow 'invoice' with instance ID 'inv-1' on app 'billing'.")
+	s, ok := structured.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "billing", s["app_id"])
+
+	raised, _, err := h.raiseWorkflowEvent(ctx, req, RaiseWorkflowEventArgs{AppID: "billing", InstanceID: "inv-1", EventName: "paid"})
+	require.NoError(t, err)
+	assert.Contains(t, text(t, raised), "Successfully raised event 'paid' for workflow instance 'inv-1' on app 'billing'.")
 }

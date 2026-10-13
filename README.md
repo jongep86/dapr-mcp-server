@@ -57,6 +57,32 @@ Settings specific to the HTTP transport:
 | --- | --- | --- |
 | `DAPR_MCP_CORS_ORIGIN` | unset (no CORS headers) | Origin allowed to call the server from a browser, for example `https://app.example.com`. Set it only when a browser-based MCP client on another origin needs access. |
 
+### Multi-app workflows
+
+Dapr workflow instances are partitioned per app-id: a sidecar only sees the
+workflows of its own app. To manage the workflows of several applications
+from one MCP server, map their sidecar gRPC endpoints:
+
+```bash
+export DAPR_MCP_SERVER_WORKFLOW_APPS="orders=localhost:50002,billing=localhost:50003"
+```
+
+- Each app is connected at startup (5 attempts, 2s apart); the server exits
+  if an app stays unreachable. Remove an app from the mapping if it is
+  intentionally down.
+- Every workflow tool takes an `appID` argument. When apps are configured,
+  `appID` is **required** on all tools except `list_workflows` (pass the
+  server's own app-id for its sidecar): routing a call to a sidecar that does
+  not own the instance can crash daprd
+  ([dapr/dapr#10217](https://github.com/dapr/dapr/issues/10217)).
+- `list_workflows` without `appID` lists all apps, reports `app_id` per
+  instance and `counts_by_app`, and reports an unreachable app as a warning
+  instead of failing. `limit` applies per app; continuation tokens are
+  returned per app and are passed back together with that `appID`.
+- `dapr run` assigns dynamic gRPC ports; use `--dapr-grpc-port` (or stable
+  Kubernetes/Catalyst endpoints) for a reliable mapping.
+- Unset or empty, the server manages only the workflows of its own app.
+
 ## Documentation
 
 | Page | Purpose |
