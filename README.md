@@ -45,6 +45,7 @@ The [configuration guide](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--http <addr>` | unset (stdio) | Serve streamable HTTP on this address instead of stdin/stdout. Health probes are served on `/livez`, `/readyz` and `/startupz`. |
+| `--stateless` | `false` | Serve streamable HTTP without server-side sessions (also `DAPR_MCP_SERVER_STATELESS=true`); clients survive server restarts, but server-to-client notifications are unavailable. |
 | `--health-check` | `false` | Probe `/livez` of a running server and exit 0 if it answers 200, 1 otherwise. Used by the container `HEALTHCHECK`. |
 | `--health-check-addr <host:port>` | from `--http`, else `localhost:8080` | Address `--health-check` probes. A wildcard host such as `0.0.0.0` is probed as `localhost`. |
 | `--version` | `false` | Print the version and exit. |
