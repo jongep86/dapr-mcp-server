@@ -97,7 +97,7 @@ Design notes:
 
 Scope: only the server's own app is visible. Dapr partitions workflows per app-id, so these tools see and manage the instances of the app the server's sidecar runs as, and `start_workflow` can only start workflows registered by that app. The `list_workflows` description states this. Reaching the workflows of other apps is a separate question that I would like to raise as a proposal: <link to the issue below, once it exists>.
 
-Known runtime bug: on a sidecar that has no actor state store configured, requesting the instance history made daprd panic with a nil pointer instead of returning an error (dapr/dapr#10217). I ran into it on Dapr 1.18.1. It is fixed by dapr/dapr#10218, which is merged. On a runtime without that fix, `get_workflow_history` can therefore take the sidecar down. This PR does not work around it.
+Known runtime bug: a workflow history query (`GetInstanceHistory`) against a sidecar that has no actor state store configured made daprd hit a nil pointer dereference and exit, instead of returning an error. I reported this as dapr/dapr#10217, seen on Dapr 1.18.1, and it is fixed by dapr/dapr#10218, which is merged. On a runtime without that fix, `get_workflow_history` can therefore take the sidecar down when the server's sidecar has no actor state store. This PR does not work around it.
 
 The PR has two commits so they can be reviewed separately:
 
@@ -121,7 +121,7 @@ Please make sure you've completed the relevant tasks for this PR, out of the fol
 
 Notes on the checklist:
 
-- Unit tests: `go test -race ./...` passes. `go test -cover ./pkg/workflow/` reports 87.5% of statements. The tests run against a mock client, not a sidecar.
+- Unit tests: `go test -race ./...` passes. `go test -cover ./pkg/workflow/`, measured locally on this branch, reports 87.5% of statements (CI has no coverage gate). The tests run against a mock client, not a sidecar.
 - Integration tests: I did not add any, and I did not run the Python harness under `test/` against this branch.
 - `./scripts/check-gofmt.sh` is clean, and `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ./cmd/dapr-mcp-server` (the CI build, without its version flag) succeeds.
 ```
@@ -174,7 +174,7 @@ Comma-separated `app-id=host:port` pairs. Malformed entries and duplicate app-id
 - `list_workflows` without `appID` fans out over all apps, merges the results, and reports `app_id` per instance and `counts_by_app`. A failing app does not fail the call; it is reported as a per-app warning and the other apps' results are returned. `limit` applies per app, and continuation tokens are returned per app (`continuation_tokens: {"orders": "..."}`); the next page of one app is fetched by passing its `appID` together with its token.
 - Mutating tools never fan out. They always target exactly one app.
 
-**Why `appID` is required in multi-app mode.** It is a guard. Defaulting a per-instance call to the server's own sidecar sends it to an app that most likely does not own the instance. While testing on Dapr 1.18.1, such a history call crashed daprd instead of returning an error (dapr/dapr#10217, fixed by dapr/dapr#10218, which is merged). The server cannot know which runtime version each configured sidecar runs, and even with the fix a silent default would report an error for an instance that exists in another app. Requiring the argument turns both cases into a hint the agent can act on.
+**Why `appID` is required in multi-app mode.** It is a guard. Defaulting a per-instance call to the server's own sidecar sends it to an app that most likely does not own the instance. A workflow history query (`GetInstanceHistory`) against a sidecar that has no actor state store configured made daprd hit a nil pointer dereference and exit, instead of returning an error. I reported this as dapr/dapr#10217, seen on Dapr 1.18.1, and it is fixed by dapr/dapr#10218, which is merged. I hit it in a multi-app setup, where a per-instance call was routed to a sidecar that did not own the instance and had no actor state store. The server cannot know which runtime version each configured sidecar runs, and even with the fix a silent default would report an error for an instance that exists in another app. Requiring the argument turns both cases into a hint the agent can act on.
 
 **Out of scope.** Merged pagination across apps, discovering workflow apps dynamically (Dapr has no registry to ask), and health-checking the extra connections beyond what gRPC does on its own.
 
@@ -228,6 +228,7 @@ For stateless HTTP:
 - [ ] Consider opening an issue before each PR. `CONTRIBUTING.md` recommends it ("Make sure there's an issue ... raised"), and the PR template asks for an issue number. Both PR bodies currently say "None yet".
 - [ ] Decide whether to run the Python harness (`cd test && uv sync && uv run python app.py`, needs a running server and sidecar) before opening the PRs. It was not run for either branch, and the "integration tests" box is unchecked in both.
 - [ ] In PR A, replace the placeholder link to the proposal issue, and in the issue the link to PR A, once both exist.
-- [ ] In PR A, name the Dapr runtime release that contains dapr/dapr#10218 if you want to. I only checked that the PR is merged (2026-07-17, into `master`), not which release ships it.
+- [ ] Confirm the Dapr version in the crash description. PR A and the issue both say "seen on Dapr 1.18.1"; that figure is taken from the filed issue dapr/dapr#10217 (runtime 1.18.1, self-hosted) and was not re-run for these drafts.
+- [ ] Check which Dapr runtime release ships dapr/dapr#10218 and name it in PR A and the issue if you want to. Only the merge was checked (2026-07-17, into `master`), not the release.
 - [ ] Follow-up, not part of these PRs: tool-reference entries in `dapr/docs` for `get_bulk_state` and the ten workflow tools. The README rows already link to those anchors.
 - [ ] If the proposal is welcomed: the implementation is `17bc623` (multi-app) and `e5bb161` (`--stateless`) on `rebase/upstream`. Both sit on top of the workflow tools, so they need a branch cut after PR A.
