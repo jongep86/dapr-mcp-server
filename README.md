@@ -82,6 +82,13 @@ All tools, with links to their entries in the [tool reference](https://docs.dapr
 | workflow | [`list_workflows`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#list_workflows) | Core | Read-only; this app's instances |
 | workflow | [`get_workflow_status`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#get_workflow_status) | Core | Read-only |
 | workflow | [`get_workflow_history`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#get_workflow_history) | Core | Read-only; event history |
+| workflow | [`start_workflow`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#start_workflow) | Core | Not idempotent without `instanceID` |
+| workflow | [`raise_workflow_event`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#raise_workflow_event) | Core | Not idempotent |
+| workflow | [`pause_workflow`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#pause_workflow) | Core | Idempotent |
+| workflow | [`resume_workflow`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#resume_workflow) | Core | Idempotent |
+| workflow | [`rerun_workflow`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#rerun_workflow) | Core | New instance from a history event |
+| workflow | [`terminate_workflow`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#terminate_workflow) | Core | Destructive |
+| workflow | [`purge_workflow`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#purge_workflow) | Core | Destructive; deletes state and history |
 | state | [`save_state`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#save_state) | `state.*` | Idempotent save |
 | state | [`get_state`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#get_state) | `state.*` | Read-only |
 | state | [`delete_state`](https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/dapr-mcp-server-tool-reference/#delete_state) | `state.*` | Destructive, idempotent |
