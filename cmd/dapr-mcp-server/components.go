@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	dtworkflow "github.com/dapr/durabletask-go/workflow"
 	dapr "github.com/dapr/go-sdk/client"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -20,6 +21,7 @@ import (
 	secret "github.com/dapr/dapr-mcp-server/pkg/secrets"
 	state "github.com/dapr/dapr-mcp-server/pkg/state"
 	"github.com/dapr/dapr-mcp-server/pkg/telemetry"
+	workflow "github.com/dapr/dapr-mcp-server/pkg/workflow"
 )
 
 // buildingBlock names a Dapr building block whose tools register only
@@ -74,12 +76,15 @@ func presentBuildingBlocks(components []metadata.ComponentInfo) map[buildingBloc
 	return present
 }
 
-// registerTools registers the core tools and then the tools for each
+// registerTools registers the core tools (including workflow) and then the tools for each
 // building block that has at least one component loaded in the sidecar.
 func registerTools(ctx context.Context, server *mcp.Server, client dapr.Client, toolMetrics *telemetry.ToolMetrics, logger *slog.Logger) error {
 	metadata.RegisterTools(server, client, toolMetrics)
 	invoke.RegisterTools(server, client, toolMetrics)
 	actor.RegisterTools(server, client, toolMetrics)
+	// Workflows are part of the Dapr runtime, not a component,
+	// so the client reuses the sidecar's gRPC connection.
+	workflow.RegisterTools(server, dtworkflow.NewClient(client.GrpcClientConn()), toolMetrics)
 
 	components, err := metadata.GetLiveComponentList(ctx, client)
 	if err != nil {
