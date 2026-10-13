@@ -1,12 +1,12 @@
 # Upstream PR and issue drafts
 
-**These are drafts. Nothing has been opened on `dapr/dapr-mcp-server`: no pull request, no issue, no comment, and no branch has been pushed.** The texts below are meant to be copied into GitHub by hand.
+**These are drafts. Nothing has been opened on `dapr/dapr-mcp-server`: no pull request, no issue, no comment.** The branches are pushed to the fork `jongep86/dapr-mcp-server`. The texts below are meant to be copied into GitHub by hand.
 
 | Draft | Local branch | Base | Commits |
 | --- | --- | --- | --- |
-| PR B: `get_bulk_state` | `upstream-pr/get-bulk-state` | `upstream/main` at `506d935` | `8425ac2`, `878cadb` |
-| PR A: workflow tools | `upstream-pr/workflow-tools` | `upstream/main` at `506d935` | `7a8af07`, `708e9dc`, `d50a71b` |
-| Issue: multi-app workflows and stateless HTTP | none (implementation lives on `rebase/upstream`: `17bc623`, `e5bb161`) | | |
+| PR B: `get_bulk_state` | `upstream-pr/get-bulk-state` | `upstream/main` at `506d935` | `6ba0127`, `47b650b` |
+| PR A: workflow tools | `upstream-pr/workflow-tools` | `upstream/main` at `506d935` | `b5de364`, `4ea2c71`, `56bc86c` |
+| Issue: multi-app workflows and stateless HTTP | none (implementation lives on `rebase/upstream`: `65b34ef`, `9e448a1`) | | |
 
 The two PRs are independent of each other and can be opened in either order. They do touch four of the same files, so the second one to merge needs a rebase; see "Before submitting". PR A is single-app: it has no `appID` argument and only talks to the server's own sidecar. The multi-app feature and `--stateless` are not part of either PR; they are what the issue proposes.
 
@@ -101,7 +101,7 @@ Design notes:
 
 Scope: only the server's own app is visible. Dapr partitions workflows per app-id, so these tools see and manage the instances of the app the server's sidecar runs as, and `start_workflow` can only start workflows registered by that app. The `list_workflows` description states this. Reaching the workflows of other apps is a separate question that I would like to raise as a proposal: <link to the issue below, once it exists>.
 
-Known runtime bug: a workflow history query (`GetInstanceHistory`) against a sidecar that has no actor state store configured made daprd hit a nil pointer dereference and exit, instead of returning an error. I reported this as dapr/dapr#10217, seen on Dapr 1.18.1, and it is fixed by dapr/dapr#10218, which is merged. On a runtime without that fix, `get_workflow_history` can therefore take the sidecar down when the server's sidecar has no actor state store. This PR does not work around it.
+Known runtime bug: a workflow history query (`GetInstanceHistory`) against a sidecar that has no actor state store configured made daprd hit a nil pointer dereference and exit, instead of returning an error. I reported this as dapr/dapr#10217, seen on Dapr 1.18.1, and it is fixed by dapr/dapr#10218, which is merged and shipped in Dapr 1.18.2 (backport dapr/dapr#10229). On a runtime without that fix, `get_workflow_history` can therefore take the sidecar down when the server's sidecar has no actor state store. This PR does not work around it.
 
 The PR has three commits so they can be reviewed separately:
 
@@ -179,7 +179,7 @@ Comma-separated `app-id=host:port` pairs. Malformed entries and duplicate app-id
 - `list_workflows` without `appID` fans out over all apps, merges the results, and reports `app_id` per instance and `counts_by_app`. A failing app does not fail the call; it is reported as a per-app warning and the other apps' results are returned. `limit` applies per app, and continuation tokens are returned per app (`continuation_tokens: {"orders": "..."}`); the next page of one app is fetched by passing its `appID` together with its token.
 - Mutating tools never fan out. They always target exactly one app.
 
-**Why `appID` is required in multi-app mode.** It is a guard. Defaulting a per-instance call to the server's own sidecar sends it to an app that most likely does not own the instance. A workflow history query (`GetInstanceHistory`) against a sidecar that has no actor state store configured made daprd hit a nil pointer dereference and exit, instead of returning an error. I reported this as dapr/dapr#10217, seen on Dapr 1.18.1, and it is fixed by dapr/dapr#10218, which is merged. I hit it in a multi-app setup, where a per-instance call was routed to a sidecar that did not own the instance and had no actor state store. The server cannot know which runtime version each configured sidecar runs, and even with the fix a silent default would report an error for an instance that exists in another app. Requiring the argument turns both cases into a hint the agent can act on.
+**Why `appID` is required in multi-app mode.** It is a guard. Defaulting a per-instance call to the server's own sidecar sends it to an app that most likely does not own the instance. A workflow history query (`GetInstanceHistory`) against a sidecar that has no actor state store configured made daprd hit a nil pointer dereference and exit, instead of returning an error. I reported this as dapr/dapr#10217, seen on Dapr 1.18.1, and it is fixed by dapr/dapr#10218, which is merged and shipped in Dapr 1.18.2 (backport dapr/dapr#10229). I hit it in a multi-app setup, where a per-instance call was routed to a sidecar that did not own the instance and had no actor state store. The server cannot know which runtime version each configured sidecar runs, and even with the fix a silent default would report an error for an instance that exists in another app. Requiring the argument turns both cases into a hint the agent can act on.
 
 **Out of scope.** Merged pagination across apps, discovering workflow apps dynamically (Dapr has no registry to ask), and health-checking the extra connections beyond what gRPC does on its own.
 
@@ -227,15 +227,12 @@ For stateless HTTP:
 
 ## Before submitting
 
-- [ ] Push `upstream-pr/get-bulk-state` and `upstream-pr/workflow-tools` to a fork of `dapr/dapr-mcp-server`. Nothing is pushed yet.
+- [x] `upstream-pr/get-bulk-state`, `upstream-pr/workflow-tools` and `rebase/upstream` are pushed to the fork `jongep86/dapr-mcp-server` (2026-10-13).
 - [ ] Rebase both branches if `upstream/main` has moved past `506d935`, and rerun `go test -race ./...` and `golangci-lint run ./...`.
 - [ ] Expect a rebase between the two PRs. They touch four shared files: the `AGENTS.md` safety table row, `internal/toolkit/safety_table_test.go`, the README tool table and `cmd/dapr-mcp-server/components_test.go`. Whichever PR merges second has to be rebased on the first. A trial merge of the two branches (`git merge-tree`) reports conflicts in `AGENTS.md` and `components_test.go`, where both add entries to the same lines; the README table and the safety table test merge cleanly. The resolution is to keep the additions of both sides.
 - [ ] Do one manual smoke run of PR A against a real sidecar before opening it. The Dapr CLI is not installed on the machine where this was built, so everything so far ran against mocks. With `dapr run` and a small workflow app: `start_workflow`, `get_workflow_status`, `get_workflow_history`, `rerun_workflow` from the `event_id` of a scheduling event, `pause_workflow` and `resume_workflow`, `raise_workflow_event`, `terminate_workflow`, `purge_workflow`. Check in particular that the history shows IDs the way PR A describes them, and that the rerun from a `taskScheduled` ID is accepted.
-- [ ] Decide whether the commits keep their `Co-Authored-By` trailer. All five commits carry one next to the `Signed-off-by` line: `8425ac2`, `7a8af07` and `708e9dc` name Claude Sonnet 5.5, `878cadb` and `d50a71b` name Claude Opus 5.5. The PR and issue texts above contain no AI attribution; adding one is your call.
 - [ ] Consider opening an issue before each PR. `CONTRIBUTING.md` recommends it ("Make sure there's an issue ... raised"), and the PR template asks for an issue number. Both PR bodies currently say "None yet".
 - [ ] Decide whether to run the Python harness (`cd test && uv sync && uv run python app.py`, needs a running server and sidecar) before opening the PRs. It was not run for either branch, and the "integration tests" box is unchecked in both.
 - [ ] In PR A, replace the placeholder link to the proposal issue, and in the issue the link to PR A, once both exist.
-- [ ] Confirm the Dapr version in the crash description. PR A and the issue both say "seen on Dapr 1.18.1"; that figure is taken from the filed issue dapr/dapr#10217 (runtime 1.18.1, self-hosted) and was not re-run for these drafts.
-- [ ] Check which Dapr runtime release ships dapr/dapr#10218 and name it in PR A and the issue if you want to. Only the merge was checked (2026-07-17, into `master`), not the release.
 - [ ] Follow-up, not part of these PRs: tool-reference entries in `dapr/docs` for `get_bulk_state` and the ten workflow tools. The README rows already link to those anchors.
-- [ ] If the proposal is welcomed: the implementation is `17bc623` (multi-app) and `e5bb161` (`--stateless`) on `rebase/upstream`. Both sit on top of the workflow tools, so they need a branch cut after PR A.
+- [ ] If the proposal is welcomed: the implementation is `65b34ef` (multi-app) and `9e448a1` (`--stateless`) on `rebase/upstream`. Both sit on top of the workflow tools, so they need a branch cut after PR A.
