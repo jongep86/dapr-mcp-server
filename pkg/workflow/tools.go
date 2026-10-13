@@ -46,6 +46,8 @@ const (
 	maxListLimit     = 500
 
 	statusPrefix = "ORCHESTRATION_STATUS_"
+
+	rerunEventIDHint = "use the event_id of a scheduling event (e.g., taskScheduled) from get_workflow_history"
 )
 
 // WorkflowClient defines the workflow operations used by the tools.
@@ -157,40 +159,81 @@ func (h *handler) getWorkflowStatus(ctx context.Context, _ *mcp.CallToolRequest,
 	return toolkit.TextResult(sb.String()), structured, nil
 }
 
-// describeEvent returns the history event's type (the name of the set
-// eventType oneof field, e.g. taskScheduled) and a short detail for the event
-// types most useful when diagnosing a workflow.
-func describeEvent(ev *protos.HistoryEvent) (string, string) {
-	eventType := "unknown"
+// eventDescription is what get_workflow_history reports about one history event.
+type eventDescription struct {
+	// eventType is the name of the set eventType oneof field, e.g. taskScheduled.
+	eventType string
+	// detail is a short human-readable summary; empty when there is none.
+	detail string
+	// refKey and refID point back at the event that scheduled this one
+	// (task_scheduled_id or timer_id); refKey is empty when there is none.
+	refKey string
+	refID  int32
+}
+
+const (
+	refTaskScheduledID = "task_scheduled_id"
+	refTimerID         = "timer_id"
+)
+
+// withRef records the back-reference and puts it in front of the detail.
+func (d eventDescription) withRef(key string, id int32, detail string) eventDescription {
+	d.refKey, d.refID = key, id
+	d.detail = fmt.Sprintf("%s: %d", key, id)
+	if detail != "" {
+		d.detail += ", " + detail
+	}
+	return d
+}
+
+// describeEvent describes a history event for the event types most useful
+// when diagnosing a workflow.
+//
+// Dapr gives a sequence ID mainly to the events that schedule work
+// (taskScheduled, timerCreated, childWorkflowInstanceCreated, ...). The events
+// that report an outcome carry event ID -1 and name their scheduling event in
+// a field of their own, which is surfaced here so a failure can be traced back
+// to the activity, child workflow or timer it belongs to.
+func describeEvent(ev *protos.HistoryEvent) eventDescription {
+	d := eventDescription{eventType: "unknown"}
 	msg := ev.ProtoReflect()
 	if oneof := msg.Descriptor().Oneofs().ByName("eventType"); oneof != nil {
 		if field := msg.WhichOneof(oneof); field != nil {
-			eventType = string(field.Name())
+			d.eventType = string(field.Name())
 		}
 	}
 
 	switch {
 	case ev.GetExecutionStarted() != nil:
-		return eventType, "workflow: " + ev.GetExecutionStarted().GetName()
+		d.detail = "workflow: " + ev.GetExecutionStarted().GetName()
 	case ev.GetExecutionCompleted() != nil:
 		completed := ev.GetExecutionCompleted()
-		detail := statusName(completed.GetWorkflowStatus())
+		d.detail = statusName(completed.GetWorkflowStatus())
 		if failure := completed.GetFailureDetails(); failure != nil {
-			detail += ": " + failure.GetErrorMessage()
+			d.detail += ": " + failure.GetErrorMessage()
 		}
-		return eventType, detail
 	case ev.GetTaskScheduled() != nil:
-		return eventType, "activity: " + ev.GetTaskScheduled().GetName()
+		d.detail = "activity: " + ev.GetTaskScheduled().GetName()
+	case ev.GetTaskCompleted() != nil:
+		return d.withRef(refTaskScheduledID, ev.GetTaskCompleted().GetTaskScheduledId(), "")
 	case ev.GetTaskFailed() != nil:
-		return eventType, "error: " + ev.GetTaskFailed().GetFailureDetails().GetErrorMessage()
+		failed := ev.GetTaskFailed()
+		return d.withRef(refTaskScheduledID, failed.GetTaskScheduledId(), "error: "+failed.GetFailureDetails().GetErrorMessage())
 	case ev.GetChildWorkflowInstanceCreated() != nil:
-		return eventType, "child workflow: " + ev.GetChildWorkflowInstanceCreated().GetName()
+		d.detail = "child workflow: " + ev.GetChildWorkflowInstanceCreated().GetName()
+	case ev.GetChildWorkflowInstanceCompleted() != nil:
+		return d.withRef(refTaskScheduledID, ev.GetChildWorkflowInstanceCompleted().GetTaskScheduledId(), "")
+	case ev.GetChildWorkflowInstanceFailed() != nil:
+		failed := ev.GetChildWorkflowInstanceFailed()
+		return d.withRef(refTaskScheduledID, failed.GetTaskScheduledId(), "error: "+failed.GetFailureDetails().GetErrorMessage())
 	case ev.GetEventRaised() != nil:
-		return eventType, "event: " + ev.GetEventRaised().GetName()
+		d.detail = "event: " + ev.GetEventRaised().GetName()
 	case ev.GetTimerCreated() != nil && ev.GetTimerCreated().GetFireAt() != nil:
-		return eventType, "fires at: " + formatTime(ev.GetTimerCreated().GetFireAt())
+		d.detail = "fires at: " + formatTime(ev.GetTimerCreated().GetFireAt())
+	case ev.GetTimerFired() != nil:
+		return d.withRef(refTimerID, ev.GetTimerFired().GetTimerId(), "")
 	}
-	return eventType, ""
+	return d
 }
 
 func (h *handler) getWorkflowHistory(ctx context.Context, _ *mcp.CallToolRequest, args InstanceArgs) (*mcp.CallToolResult, any, error) {
@@ -211,15 +254,25 @@ func (h *handler) getWorkflowHistory(ctx context.Context, _ *mcp.CallToolRequest
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Workflow instance '%s' on app '%s' has %d history event(s):", args.InstanceID, t.appID, len(history))
 	for _, ev := range history {
-		eventType, detail := describeEvent(ev)
-		event := map[string]any{"event_id": ev.GetEventId(), "type": eventType}
-		fmt.Fprintf(&sb, "\n- #%d %s", ev.GetEventId(), eventType)
+		d := describeEvent(ev)
+		event := map[string]any{"type": d.eventType}
+		sb.WriteString("\n- ")
+		// A negative event ID means "no sequence ID": leave it out instead of
+		// offering -1 as something to rerun from.
+		if id := ev.GetEventId(); id >= 0 {
+			event["event_id"] = id
+			fmt.Fprintf(&sb, "#%d ", id)
+		}
+		sb.WriteString(d.eventType)
+		if d.refKey != "" {
+			event[d.refKey] = d.refID
+		}
 		if ev.GetTimestamp() != nil {
 			event["timestamp"] = formatTime(ev.GetTimestamp())
 		}
-		if detail != "" {
-			event["detail"] = detail
-			fmt.Fprintf(&sb, " (%s)", detail)
+		if d.detail != "" {
+			event["detail"] = d.detail
+			fmt.Fprintf(&sb, " (%s)", d.detail)
 		}
 		events = append(events, event)
 	}
@@ -285,7 +338,9 @@ func listInstances(ctx context.Context, t target, pageSize uint32, continuationT
 	l.instances = make([]instanceSummary, 0, len(pr.GetInstanceIds()))
 	l.continuationToken = pr.GetContinuationToken()
 	for _, id := range pr.GetInstanceIds() {
-		meta, err := t.client.FetchWorkflowMetadata(ctx, id)
+		// The listing only reports name, status and creation time: do not make
+		// the sidecar load every instance's input, output and custom status.
+		meta, err := t.client.FetchWorkflowMetadata(ctx, id, wf.WithFetchPayloads(false))
 		if err != nil {
 			l.skipped++
 			continue
@@ -446,7 +501,7 @@ type ReasonArgs struct {
 type RerunWorkflowArgs struct {
 	AppID         string `json:"appID,omitempty" jsonschema:"App ID of the workflow application to target. REQUIRED when multiple workflow apps are configured (the server's own app-id is accepted too); may be omitted in single-app setups."`
 	InstanceID    string `json:"instanceID" jsonschema:"The instance ID of the (typically failed) workflow to rerun."`
-	EventID       int64  `json:"eventID" jsonschema:"The event ID from get_workflow_history to rerun from."`
+	EventID       int64  `json:"eventID" jsonschema:"The event_id of a scheduling event (e.g., taskScheduled) from get_workflow_history to rerun from."`
 	NewInstanceID string `json:"newInstanceID,omitempty" jsonschema:"Optional instance ID for the new instance. If omitted, Dapr generates one."`
 	Input         string `json:"input,omitempty" jsonschema:"Optional replacement input for the rerun, typically a JSON string. If omitted, the original input is reused."`
 }
@@ -476,7 +531,8 @@ func (h *handler) startWorkflow(ctx context.Context, _ *mcp.CallToolRequest, arg
 	}
 
 	var opts []wf.NewWorkflowOptions
-	if args.InstanceID != "" {
+	// A whitespace-only ID counts as omitted, so Dapr generates one.
+	if strings.TrimSpace(args.InstanceID) != "" {
 		opts = append(opts, wf.WithInstanceID(args.InstanceID))
 	}
 	if args.Input != "" {
@@ -523,12 +579,16 @@ func (h *handler) rerunWorkflow(ctx context.Context, _ *mcp.CallToolRequest, arg
 	if res != nil {
 		return res, nil, nil
 	}
-	if args.EventID < 0 || args.EventID > math.MaxUint32 {
-		return call.Fail(fmt.Errorf("invalid eventID %d: use an event ID from get_workflow_history", args.EventID)), nil, nil
+	switch {
+	case args.EventID < 0:
+		return call.Fail(fmt.Errorf("invalid eventID %d: events without a sequence ID cannot be rerun from; %s", args.EventID, rerunEventIDHint)), nil, nil
+	case args.EventID > math.MaxUint32:
+		return call.Fail(fmt.Errorf("invalid eventID %d: out of range; %s", args.EventID, rerunEventIDHint)), nil, nil
 	}
 
 	var opts []wf.RerunOptions
-	if args.NewInstanceID != "" {
+	// A whitespace-only ID counts as omitted, so Dapr generates one.
+	if strings.TrimSpace(args.NewInstanceID) != "" {
 		opts = append(opts, wf.WithRerunNewInstanceID(args.NewInstanceID))
 	}
 	if args.Input != "" {
@@ -556,7 +616,7 @@ func (h *handler) pauseWorkflow(ctx context.Context, _ *mcp.CallToolRequest, arg
 	}
 	call.Succeed("app_id", t.appID, "instance_id", args.InstanceID)
 	text := fmt.Sprintf("Successfully paused workflow instance '%s' on app '%s'.", args.InstanceID, t.appID)
-	return toolkit.TextResult(text), map[string]any{"app_id": t.appID, "instance_id": args.InstanceID, "status": "SUSPENDED"}, nil
+	return toolkit.TextResult(text), map[string]any{"app_id": t.appID, "instance_id": args.InstanceID, "requested": true}, nil
 }
 
 func (h *handler) resumeWorkflow(ctx context.Context, _ *mcp.CallToolRequest, args ReasonArgs) (*mcp.CallToolResult, any, error) {
@@ -570,7 +630,7 @@ func (h *handler) resumeWorkflow(ctx context.Context, _ *mcp.CallToolRequest, ar
 	}
 	call.Succeed("app_id", t.appID, "instance_id", args.InstanceID)
 	text := fmt.Sprintf("Successfully resumed workflow instance '%s' on app '%s'.", args.InstanceID, t.appID)
-	return toolkit.TextResult(text), map[string]any{"app_id": t.appID, "instance_id": args.InstanceID, "status": "RUNNING"}, nil
+	return toolkit.TextResult(text), map[string]any{"app_id": t.appID, "instance_id": args.InstanceID, "requested": true}, nil
 }
 
 func (h *handler) terminateWorkflow(ctx context.Context, _ *mcp.CallToolRequest, args InstanceArgs) (*mcp.CallToolResult, any, error) {
@@ -584,7 +644,7 @@ func (h *handler) terminateWorkflow(ctx context.Context, _ *mcp.CallToolRequest,
 	}
 	call.Succeed("app_id", t.appID, "instance_id", args.InstanceID)
 	text := fmt.Sprintf("Successfully requested termination of workflow instance '%s' on app '%s'.", args.InstanceID, t.appID)
-	return toolkit.TextResult(text), map[string]any{"app_id": t.appID, "instance_id": args.InstanceID, "status": "TERMINATED"}, nil
+	return toolkit.TextResult(text), map[string]any{"app_id": t.appID, "instance_id": args.InstanceID, "requested": true}, nil
 }
 
 func (h *handler) raiseWorkflowEvent(ctx context.Context, _ *mcp.CallToolRequest, args RaiseWorkflowEventArgs) (*mcp.CallToolResult, any, error) {
@@ -669,7 +729,8 @@ func RegisterTools(server *mcp.Server, clients Clients, metrics *telemetry.ToolM
 		Description: "Retrieves the event history of a workflow instance: scheduled and completed activities, timers, raised events, and failures. **This is a READ-ONLY action and IS IDEMPOTENT.**\n\n" +
 			"**GUIDANCE:**\n" +
 			"1. Use this to diagnose WHY a workflow failed or is stuck.\n" +
-			"2. The returned `event_id` values can be passed to `rerun_workflow`.\n\n" +
+			"2. Not every event has an `event_id`: mainly the events that schedule work (e.g., `taskScheduled`, `timerCreated`, `childWorkflowInstanceCreated`) do. The `event_id` of such a scheduling event is what `rerun_workflow` takes.\n" +
+			"3. Events that report an outcome (e.g., `taskCompleted`, `taskFailed`, `timerFired`) have no `event_id`. Their `task_scheduled_id` or `timer_id` is the `event_id` of the event that scheduled them: use it to find which activity, child workflow, or timer the outcome belongs to.\n\n" +
 			"**ARGUMENT RULES:**\n" +
 			"1. **REQUIRED INPUTS**: You MUST provide a non-empty `instanceID`.\n" +
 			"2. " + appIDRule,
@@ -678,7 +739,7 @@ func RegisterTools(server *mcp.Server, clients Clients, metrics *telemetry.ToolM
 	mcp.AddTool(server, &mcp.Tool{
 		Name:  toolListWorkflows,
 		Title: "List Workflow Instances",
-		Description: "Lists workflow instances with their app, workflow name, runtime status, and creation time, plus counts per workflow and per status. **This is a READ-ONLY action and IS IDEMPOTENT.** The tool does NOT filter; filter the returned list yourself.\n\n" +
+		Description: "Lists workflow instances with their app, workflow name, runtime status, and creation time, plus counts per workflow and per status. **This is a READ-ONLY action and IS IDEMPOTENT.** The tool does NOT filter; filter the returned list yourself. Inputs, outputs, and custom status are not fetched: use `get_workflow_status` for those.\n\n" +
 			"**GUIDANCE:**\n" +
 			"1. When multiple workflow apps are configured and `appID` is omitted, all apps are listed with counts per app; one failing app is reported as a warning instead of failing the call.\n" +
 			"2. `limit` applies per app. If continuation tokens are returned, call again with the matching `appID` and `continuationToken` before drawing conclusions about totals.\n" +
@@ -705,7 +766,7 @@ func RegisterTools(server *mcp.Server, clients Clients, metrics *telemetry.ToolM
 		Description: "Reruns a workflow instance from an event in its history as a NEW instance, reusing the results recorded before that event. **This is a SIDE-EFFECT action that is NOT IDEMPOTENT** unless an explicit `newInstanceID` is provided.\n\n" +
 			"**ARGUMENT RULES:**\n" +
 			"1. **REQUIRED INPUTS**: You MUST provide a non-empty `instanceID` and an `eventID`.\n" +
-			"2. **NEVER INVENT**: Take `eventID` from `get_workflow_history`.\n" +
+			"2. **NEVER INVENT**: Take `eventID` from `get_workflow_history`: use the `event_id` of a scheduling event (e.g., `taskScheduled`). Events without an `event_id` cannot be rerun from; use the `task_scheduled_id` of a failed task to find its scheduling event.\n" +
 			"3. " + appIDRule,
 		Annotations: toolkit.AdditiveWrite.Annotations(true),
 	}, h.rerunWorkflow)
@@ -730,10 +791,10 @@ func RegisterTools(server *mcp.Server, clients Clients, metrics *telemetry.ToolM
 	mcp.AddTool(server, &mcp.Tool{
 		Name:  toolTerminateWorkflow,
 		Title: "Terminate Workflow Instance",
-		Description: "Forcefully terminates a running workflow instance without executing its remaining steps. **This is a DESTRUCTIVE action that cannot be undone and IS IDEMPOTENT.**\n\n" +
+		Description: "Forcefully terminates a running workflow instance without executing its remaining steps. It also terminates the child workflows the instance started. **This is a DESTRUCTIVE action that cannot be undone and IS IDEMPOTENT.**\n\n" +
 			"**ARGUMENT RULES:**\n" +
 			"1. **REQUIRED INPUTS**: You MUST provide a non-empty `instanceID`.\n" +
-			"2. **CONFIRMATION**: Unless the user explicitly asked for termination, confirm before calling this tool.\n" +
+			"2. **CONFIRMATION**: Confirm with the user before calling this tool, unless the user explicitly asked for it.\n" +
 			"3. " + appIDRule,
 		Annotations: toolkit.DestructiveIdempotent.Annotations(true),
 	}, h.terminateWorkflow)
@@ -751,10 +812,10 @@ func RegisterTools(server *mcp.Server, clients Clients, metrics *telemetry.ToolM
 	mcp.AddTool(server, &mcp.Tool{
 		Name:  toolPurgeWorkflow,
 		Title: "Purge Workflow Instance State",
-		Description: "Permanently deletes the state and history of a COMPLETED, FAILED, or TERMINATED workflow instance. **This is a DESTRUCTIVE action that cannot be undone and is NOT IDEMPOTENT.**\n\n" +
+		Description: "Permanently deletes the state and history of a COMPLETED, FAILED, or TERMINATED workflow instance. The purge request is not recursive: child workflows keep their state, purge those separately. **This is a DESTRUCTIVE action that cannot be undone and is NOT IDEMPOTENT.**\n\n" +
 			"**ARGUMENT RULES:**\n" +
 			"1. **REQUIRED INPUTS**: You MUST provide a non-empty `instanceID`.\n" +
-			"2. **CONFIRMATION**: Unless the user explicitly asked for purging, confirm before calling this tool.\n" +
+			"2. **CONFIRMATION**: Confirm with the user before calling this tool, unless the user explicitly asked for it.\n" +
 			"3. " + appIDRule,
 		Annotations: toolkit.DestructiveWrite.Annotations(true),
 	}, h.purgeWorkflow)

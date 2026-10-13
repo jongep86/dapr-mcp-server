@@ -98,7 +98,7 @@ The only always-available tools that don't need a prior `get_components` call ar
 - **Call another microservice?** → `invoke_service`.
 - **Call a stateful actor?** → `invoke_actor_method`.
 - **Inspect a long-running process?** → `list_workflows`, then `get_workflow_status`; `get_workflow_history` to see why it failed or is stuck.
-- **Run or steer a long-running process?** → `start_workflow`; `raise_workflow_event` to unblock one waiting for input; `pause_workflow` / `resume_workflow`; `rerun_workflow` to retry from a history event; `terminate_workflow` / `purge_workflow` only on explicit request.
+- **Run or steer a long-running process?** → `start_workflow`; `raise_workflow_event` to unblock one waiting for input; `pause_workflow` / `resume_workflow`; `rerun_workflow` to retry from a scheduling event in the history; confirm with the user before `terminate_workflow` or `purge_workflow` unless the user explicitly asked for it.
 - **Reach an external system** (webhook, queue, object store)? → `invoke_output_binding`.
 - **Fetch a secret?** → `get_secret` (single) or `get_bulk_secrets` (high-risk — only when user explicitly asked to enumerate).
 - **Defer reasoning to another LLM?** → `converse_with_llm`.
