@@ -212,7 +212,7 @@ func buildInstructions() string {
 	b.WriteString("- **Serialization**: Metadata fields MUST be a dictionary/map (e.g., `{}`) and NEVER a quoted string (e.g., `\"{}\"`).\n")
 	b.WriteString("- **Multi-Step Workflow**: When multiple operations are requested, execute them sequentially — **one tool call at a time**.\n")
 	b.WriteString("- **Forbidden Actions**: NEVER invent component names, keys, topics, workflow names, instance IDs, or cryptographic parameters.\n")
-	b.WriteString("- **Workflows**: The workflow tools need no component. Take instance IDs from `start_workflow` or `list_workflows`, and confirm with the user before `terminate_workflow` or `purge_workflow`.\n\n")
+	b.WriteString("- **Workflows**: The workflow tools need no component. Take instance IDs from `start_workflow` or `list_workflows`, and confirm with the user before `terminate_workflow` or `purge_workflow` unless the user explicitly asked for it.\n\n")
 	b.WriteString("### Tool Call Validity\n")
 	b.WriteString("Consult the tool's Description for specific component rules (e.g., key formatting, security warnings).\n")
 	return b.String()
