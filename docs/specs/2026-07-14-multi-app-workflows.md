@@ -68,17 +68,20 @@ Every workflow tool gains an `appID` argument:
   (the agent can self-correct).
 
 The required-`appID` rule in multi-app mode is a hardening guard, added
-after field testing: routing a per-instance call (history/status) to a
-sidecar that does not own the instance crashed daprd itself with a nil
-dereference in `wfengine/state.LoadWorkflowState` (observed on Dapr 1.18.1)
-— an agent forgetting `appID` could take down the MCP server's own `dapr
-run`. Requiring the argument turns a fatal sidecar crash into a
-self-correcting hint. This is a Dapr runtime bug (crash instead of a clean
-error); it was reported upstream as
+after field testing. The root cause is a Dapr runtime bug: a workflow
+history query (`GetInstanceHistory`) against a sidecar that has no actor
+state store configured made daprd hit a nil pointer dereference and exit,
+instead of returning an error (in `wfengine/state.LoadWorkflowState`,
+observed on Dapr 1.18.1). It was reported upstream as
 [dapr/dapr#10217](https://github.com/dapr/dapr/issues/10217) and fixed by
 [dapr/dapr#10218](https://github.com/dapr/dapr/pull/10218), which is merged.
-The guard stays, because the server cannot know which runtime version a
-configured sidecar runs.
+In a multi-app setup it was hit when a per-instance call was routed to a
+sidecar that did not own the instance and had no actor state store: an agent
+forgetting `appID` could take down the MCP server's own `dapr run`.
+Requiring the argument turns that into a self-correcting hint. The guard
+stays, because the server cannot know which runtime version a configured
+sidecar runs, and because even with the fix a silent default would report
+an error for an instance that exists in another app.
 
 `list_workflows` is the exception with richer semantics:
 

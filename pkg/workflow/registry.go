@@ -77,11 +77,15 @@ func (r registry) targets() []target {
 // clientFor resolves appID to a single workflow client.
 //
 // Without configured apps, an empty appID selects the default client. With
-// configured apps, appID is required: routing a per-instance call to a
-// sidecar that does not own the instance can crash daprd (dapr/dapr#10217),
-// so the caller must name the app explicitly. The server's own app-id is
-// always accepted. Unknown app-ids produce an error listing the valid ones so
-// the agent can self-correct.
+// configured apps, appID is required, so the caller must name the app
+// explicitly: a default would route a per-instance call to a sidecar that
+// most likely does not own the instance. A workflow history query
+// (GetInstanceHistory) against a sidecar that has no actor state store
+// configured made daprd hit a nil pointer dereference and exit
+// (dapr/dapr#10217, fixed by the merged dapr/dapr#10218); in a multi-app
+// setup that was hit by exactly such a misrouted call. The server's own
+// app-id is always accepted. Unknown app-ids produce an error listing the
+// valid ones so the agent can self-correct.
 func (r registry) clientFor(appID string) (target, error) {
 	if appID == "" {
 		if r.multiApp() {
