@@ -78,7 +78,7 @@ func listRegisteredTools(t *testing.T) []*mcp.Tool {
 	conversation.RegisterTools(server, client, nil)
 	cryptography.RegisterTools(server, client, nil)
 	lock.RegisterTools(server, client, nil)
-	workflow.RegisterTools(server, nil, nil)
+	workflow.RegisterTools(server, workflow.Clients{}, nil)
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	serverSession, err := server.Connect(ctx, serverTransport, nil)

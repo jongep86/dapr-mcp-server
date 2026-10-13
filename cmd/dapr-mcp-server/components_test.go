@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/dapr/dapr-mcp-server/pkg/metadata"
+	"github.com/dapr/dapr-mcp-server/pkg/workflow"
 )
 
 var (
@@ -51,7 +52,7 @@ func (c *testDaprClient) GetMetadata(ctx context.Context) (*dapr.GetMetadataResp
 
 func (c *testDaprClient) Close() {}
 
-// GrpcClientConn returns nil: registration only stores the connection.
+// GrpcClientConn returns nil: building a workflow client only stores the connection.
 func (c *testDaprClient) GrpcClientConn() *grpc.ClientConn { return nil }
 
 func discardLogger() *slog.Logger {
@@ -172,7 +173,7 @@ func TestRegisterTools(t *testing.T) {
 			client.On("GetMetadata", mock.Anything).Return(metadataWithTypes(tt.types...), nil)
 			server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "v0.0.0"}, nil)
 
-			require.NoError(t, registerTools(context.Background(), server, client, nil, discardLogger()))
+			require.NoError(t, registerTools(context.Background(), server, client, workflow.Clients{}, nil, discardLogger()))
 			assert.Equal(t, tt.want, listToolNames(t, server))
 		})
 	}
@@ -187,7 +188,7 @@ func TestToolInputSchemasAreNotNullable(t *testing.T) {
 		"lock.redis", "conversation.echo", "crypto.dapr.localstorage",
 	), nil)
 	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "v0.0.0"}, nil)
-	require.NoError(t, registerTools(context.Background(), server, client, nil, discardLogger()))
+	require.NoError(t, registerTools(context.Background(), server, client, workflow.Clients{}, nil, discardLogger()))
 
 	for _, tool := range listTools(t, server) {
 		schema, err := json.Marshal(tool.InputSchema)
@@ -202,7 +203,7 @@ func TestRegisterToolsMetadataError(t *testing.T) {
 	client.On("GetMetadata", mock.Anything).Return(nil, sidecarErr)
 	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "v0.0.0"}, nil)
 
-	err := registerTools(context.Background(), server, client, nil, discardLogger())
+	err := registerTools(context.Background(), server, client, workflow.Clients{}, nil, discardLogger())
 	require.ErrorIs(t, err, sidecarErr)
 	assert.Equal(t, coreTools, listToolNames(t, server), "core tools register before component discovery")
 }
