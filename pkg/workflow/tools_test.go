@@ -235,3 +235,241 @@ func TestListWorkflowsSkipsUnfetchableInstances(t *testing.T) {
 	require.True(t, ok)
 	assert.Contains(t, s, "warning")
 }
+
+func TestStartWorkflowSendsRawInputAndDoesNotLogIt(t *testing.T) {
+	t.Parallel()
+	h, client, logs := newTestHandler(t)
+	const input = `{"qty":1,"note":"sensitive-input"}`
+	client.On("ScheduleWorkflow", mock.Anything, "order", mock.MatchedBy(func(opts []wf.NewWorkflowOptions) bool {
+		req := &protos.CreateInstanceRequest{}
+		for _, opt := range opts {
+			require.NoError(t, opt(req))
+		}
+		return len(opts) == 2 && req.GetInstanceId() == "order-1" && req.GetInput().GetValue() == input
+	})).Return("order-1", nil)
+
+	result, structured, err := h.startWorkflow(context.Background(), &mcp.CallToolRequest{}, StartWorkflowArgs{
+		WorkflowName: "order", InstanceID: "order-1", Input: input,
+	})
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, text(t, result), "Successfully started workflow 'order' with instance ID 'order-1'.")
+	s, ok := structured.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "order-1", s["instance_id"])
+	assert.NotContains(t, logs.String(), "sensitive-input")
+}
+
+func TestStartWorkflowSchedulesAtStartTime(t *testing.T) {
+	t.Parallel()
+	h, client, _ := newTestHandler(t)
+	client.On("ScheduleWorkflow", mock.Anything, "order", mock.MatchedBy(func(opts []wf.NewWorkflowOptions) bool {
+		req := &protos.CreateInstanceRequest{}
+		for _, opt := range opts {
+			require.NoError(t, opt(req))
+		}
+		return req.GetScheduledStartTimestamp().AsTime().Equal(createdAt)
+	})).Return("generated", nil)
+
+	result, structured, err := h.startWorkflow(context.Background(), &mcp.CallToolRequest{}, StartWorkflowArgs{
+		WorkflowName: "order", StartTime: "2026-07-14T06:00:00Z",
+	})
+
+	require.NoError(t, err)
+	assert.Contains(t, text(t, result), "to start at 2026-07-14T06:00:00Z")
+	s, ok := structured.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "2026-07-14T06:00:00Z", s["start_time"])
+}
+
+func TestStartWorkflowRequiresName(t *testing.T) {
+	t.Parallel()
+	h, _, _ := newTestHandler(t)
+	result, _, err := h.startWorkflow(context.Background(), &mcp.CallToolRequest{}, StartWorkflowArgs{WorkflowName: " "})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, text(t, result), "missing required argument: workflowName")
+}
+
+func TestStartWorkflowRejectsBadStartTime(t *testing.T) {
+	t.Parallel()
+	h, _, _ := newTestHandler(t)
+	result, _, err := h.startWorkflow(context.Background(), &mcp.CallToolRequest{}, StartWorkflowArgs{WorkflowName: "order", StartTime: "tomorrow"})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, text(t, result), `invalid startTime "tomorrow"`)
+}
+
+func TestStartWorkflowDaprFailure(t *testing.T) {
+	t.Parallel()
+	h, client, _ := newTestHandler(t)
+	client.On("ScheduleWorkflow", mock.Anything, "order", mock.Anything).Return("", errors.New("not registered"))
+	result, _, err := h.startWorkflow(context.Background(), &mcp.CallToolRequest{}, StartWorkflowArgs{WorkflowName: "order"})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, text(t, result), `start workflow "order": not registered`)
+}
+
+func TestRerunWorkflow(t *testing.T) {
+	t.Parallel()
+	h, client, _ := newTestHandler(t)
+	client.On("RerunWorkflowFromEvent", mock.Anything, "order-1", uint32(4), mock.MatchedBy(func(opts []wf.RerunOptions) bool {
+		req := &protos.RerunWorkflowFromEventRequest{}
+		for _, opt := range opts {
+			require.NoError(t, opt(req))
+		}
+		return req.GetNewInstanceID() == "order-1-rerun" && req.GetInput().GetValue() == `{"qty":2}` && req.GetOverwriteInput()
+	})).Return("order-1-rerun", nil)
+
+	result, structured, err := h.rerunWorkflow(context.Background(), &mcp.CallToolRequest{}, RerunWorkflowArgs{
+		InstanceID: "order-1", EventID: 4, NewInstanceID: "order-1-rerun", Input: `{"qty":2}`,
+	})
+
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Contains(t, text(t, result), "from event 4 as new instance 'order-1-rerun'")
+	s, ok := structured.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "order-1-rerun", s["new_instance_id"])
+}
+
+func TestRerunRejectsOutOfRangeEventID(t *testing.T) {
+	t.Parallel()
+	for _, eventID := range []int64{-1, 1 << 32} {
+		h, _, _ := newTestHandler(t) // the client must not be called
+		result, _, err := h.rerunWorkflow(context.Background(), &mcp.CallToolRequest{}, RerunWorkflowArgs{InstanceID: "order-1", EventID: eventID})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Contains(t, text(t, result), "use an event ID from get_workflow_history")
+	}
+}
+
+func TestRaiseWorkflowEvent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sends raw event data", func(t *testing.T) {
+		t.Parallel()
+		h, client, logs := newTestHandler(t)
+		client.On("RaiseEvent", mock.Anything, "order-1", "approval", mock.MatchedBy(func(opts []wf.RaiseEventOptions) bool {
+			req := &protos.RaiseEventRequest{}
+			for _, opt := range opts {
+				require.NoError(t, opt(req))
+			}
+			return req.GetInput().GetValue() == `{"approved":true,"by":"sensitive-name"}`
+		})).Return(nil)
+
+		result, _, err := h.raiseWorkflowEvent(context.Background(), &mcp.CallToolRequest{}, RaiseWorkflowEventArgs{
+			InstanceID: "order-1", EventName: "approval", EventData: `{"approved":true,"by":"sensitive-name"}`,
+		})
+
+		require.NoError(t, err)
+		assert.False(t, result.IsError)
+		assert.Contains(t, text(t, result), "Successfully raised event 'approval' for workflow instance 'order-1'.")
+		assert.NotContains(t, logs.String(), "sensitive-name")
+	})
+
+	t.Run("requires eventName", func(t *testing.T) {
+		t.Parallel()
+		h, _, _ := newTestHandler(t)
+		result, _, err := h.raiseWorkflowEvent(context.Background(), &mcp.CallToolRequest{}, RaiseWorkflowEventArgs{InstanceID: "order-1"})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Contains(t, text(t, result), "missing required argument: eventName")
+	})
+}
+
+func TestInstanceActionTools(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		method     string
+		mockArgs   []any
+		call       func(h *handler) (*mcp.CallToolResult, any, error)
+		wantText   string
+		wantStatus any
+		wantFail   string
+	}{
+		{
+			name: "pause", method: "SuspendWorkflow", mockArgs: []any{mock.Anything, "order-1", "maintenance"},
+			call: func(h *handler) (*mcp.CallToolResult, any, error) {
+				return h.pauseWorkflow(context.Background(), &mcp.CallToolRequest{}, ReasonArgs{InstanceID: "order-1", Reason: "maintenance"})
+			},
+			wantText: "Successfully paused workflow instance 'order-1'.", wantStatus: "SUSPENDED",
+			wantFail: `pause workflow instance "order-1": boom`,
+		},
+		{
+			name: "resume", method: "ResumeWorkflow", mockArgs: []any{mock.Anything, "order-1", ""},
+			call: func(h *handler) (*mcp.CallToolResult, any, error) {
+				return h.resumeWorkflow(context.Background(), &mcp.CallToolRequest{}, ReasonArgs{InstanceID: "order-1"})
+			},
+			wantText: "Successfully resumed workflow instance 'order-1'.", wantStatus: "RUNNING",
+			wantFail: `resume workflow instance "order-1": boom`,
+		},
+		{
+			name: "terminate", method: "TerminateWorkflow", mockArgs: []any{mock.Anything, "order-1", mock.Anything},
+			call: func(h *handler) (*mcp.CallToolResult, any, error) {
+				return h.terminateWorkflow(context.Background(), &mcp.CallToolRequest{}, InstanceArgs{InstanceID: "order-1"})
+			},
+			wantText: "Successfully requested termination of workflow instance 'order-1'.", wantStatus: "TERMINATED",
+			wantFail: `terminate workflow instance "order-1": boom`,
+		},
+		{
+			name: "purge", method: "PurgeWorkflowState", mockArgs: []any{mock.Anything, "order-1", mock.Anything},
+			call: func(h *handler) (*mcp.CallToolResult, any, error) {
+				return h.purgeWorkflow(context.Background(), &mcp.CallToolRequest{}, InstanceArgs{InstanceID: "order-1"})
+			},
+			wantText: "Successfully purged the state of workflow instance 'order-1'.",
+			wantFail: `purge workflow instance "order-1": boom`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+" success", func(t *testing.T) {
+			t.Parallel()
+			h, client, _ := newTestHandler(t)
+			client.On(tt.method, tt.mockArgs...).Return(nil)
+			result, structured, err := tt.call(h)
+			require.NoError(t, err)
+			assert.False(t, result.IsError)
+			assert.Contains(t, text(t, result), tt.wantText)
+			if tt.wantStatus != nil {
+				s, ok := structured.(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, tt.wantStatus, s["status"])
+			}
+		})
+		t.Run(tt.name+" failure", func(t *testing.T) {
+			t.Parallel()
+			h, client, _ := newTestHandler(t)
+			client.On(tt.method, tt.mockArgs...).Return(errors.New("boom"))
+			result, _, err := tt.call(h)
+			require.NoError(t, err)
+			assert.True(t, result.IsError)
+			assert.Contains(t, text(t, result), tt.wantFail)
+		})
+	}
+}
+
+func TestMutatingToolsRequireInstanceID(t *testing.T) {
+	t.Parallel()
+	h, _, _ := newTestHandler(t) // the client must not be called
+	ctx, req := context.Background(), &mcp.CallToolRequest{}
+	calls := map[string]func() (*mcp.CallToolResult, any, error){
+		"rerun": func() (*mcp.CallToolResult, any, error) {
+			return h.rerunWorkflow(ctx, req, RerunWorkflowArgs{EventID: 1})
+		},
+		"pause":     func() (*mcp.CallToolResult, any, error) { return h.pauseWorkflow(ctx, req, ReasonArgs{}) },
+		"resume":    func() (*mcp.CallToolResult, any, error) { return h.resumeWorkflow(ctx, req, ReasonArgs{}) },
+		"terminate": func() (*mcp.CallToolResult, any, error) { return h.terminateWorkflow(ctx, req, InstanceArgs{}) },
+		"raise": func() (*mcp.CallToolResult, any, error) {
+			return h.raiseWorkflowEvent(ctx, req, RaiseWorkflowEventArgs{EventName: "e"})
+		},
+		"purge": func() (*mcp.CallToolResult, any, error) { return h.purgeWorkflow(ctx, req, InstanceArgs{}) },
+	}
+	for name, call := range calls {
+		result, _, err := call()
+		require.NoError(t, err, name)
+		assert.True(t, result.IsError, name)
+		assert.Contains(t, text(t, result), "instanceID", name)
+	}
+}
