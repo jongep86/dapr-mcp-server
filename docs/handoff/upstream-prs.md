@@ -91,7 +91,7 @@ Design notes:
 - **Agent guidance.** The server instructions gain a line telling agents to take instance IDs from `start_workflow` or `list_workflows` and to confirm with the user before `terminate_workflow` or `purge_workflow` unless the user explicitly asked for it. The two destructive tool descriptions and the `AGENTS.md` decision tree state the same rule.
 - **Docs.** The `AGENTS.md` safety table and decision tree, `internal/toolkit/safety_table_test.go` and the README tool table are updated. The README rows link to anchors in the tool reference on docs.dapr.io that do not exist yet; I will open a follow-up PR against `dapr/docs`.
 
-Scope: only the server's own app is visible. Dapr partitions workflows per app-id, so these tools see and manage the instances of the app the server's sidecar runs as, and `start_workflow` can only start workflows registered by that app. The `list_workflows` description states this. Reaching the workflows of other apps is a separate question that I would like to raise as a proposal: <link to the issue below, once it exists>.
+Scope: only the server's own app is visible. Dapr partitions workflows per app-id, so these tools see and manage the instances of the app the server's sidecar runs as, and `start_workflow` can only start workflows registered by that app. The `list_workflows` description states this. Reaching the workflows of other apps is a separate question that I will raise as a proposal once this PR has landed.
 
 Known runtime bug: a workflow history query (`GetInstanceHistory`) against a sidecar that has no actor state store configured made daprd hit a nil pointer dereference and exit, instead of returning an error. I reported this as dapr/dapr#10217, seen on Dapr 1.18.1, and it is fixed by dapr/dapr#10218, which is merged and shipped in Dapr 1.18.2 (backport dapr/dapr#10229). On a runtime without that fix, `get_workflow_history` can therefore take the sidecar down when the server's sidecar has no actor state store. This PR does not work around it.
 
@@ -309,6 +309,6 @@ For stateless HTTP:
 - [x] Manual smoke run of PR A against Dapr 1.18.2 (2026-10-16): all ten tools, see the notes on PR A's checklist. Not covered: `terminate_workflow` on an instance with child workflows (the recursive default), and the multi-app layer on `rebase/upstream`.
 - [x] Issues opened first, as `CONTRIBUTING.md` asks: #90 for PR A and #91 for PR B (2026-10-16). The PR bodies say `Closes #90` and `Closes #91`.
 - [ ] Decide whether to run the Python harness (`cd test && uv sync && uv run python app.py`, needs a running server and sidecar) before opening the PRs. It was not run for either branch, and the "integration tests" box is unchecked in both.
-- [ ] In PR A, replace the placeholder link to the proposal issue, and in the issue the link to PR A, once both exist.
+- [ ] The proposal issue waits until PR A has merged. When opening it, replace the placeholder link to PR A in its text with the PR number.
 - [ ] Follow-up, not part of these PRs: tool-reference entries in `dapr/docs` for `get_bulk_state` and the ten workflow tools. The README rows already link to those anchors.
 - [ ] If the proposal is welcomed: the implementation is `65b34ef` (multi-app) and `9e448a1` (`--stateless`) on `rebase/upstream`. Both sit on top of the workflow tools, so they need a branch cut after PR A.
