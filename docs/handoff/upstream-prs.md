@@ -1,12 +1,12 @@
 # Upstream PR and issue drafts
 
-**These are drafts. Nothing has been opened on `dapr/dapr-mcp-server`: no pull request, no issue, no comment.** The branches are pushed to the fork `jongep86/dapr-mcp-server`. The texts below are meant to be copied into GitHub by hand.
+**Opened so far on `dapr/dapr-mcp-server`: issues #90 and #91. No pull request and no comment yet.** The branches are pushed to the fork `jongep86/dapr-mcp-server`. The texts below are meant to be copied into GitHub by hand.
 
 | Draft | Local branch | Base | Commits |
 | --- | --- | --- | --- |
-| Issue for PR A | none | | |
+| Issue for PR A: dapr/dapr-mcp-server#90 (opened 2026-10-16) | none | | |
 | PR A: workflow tools | `upstream-pr/workflow-tools` | `upstream/main` at `f672ba8` | `9441caf`, `5c8914f` |
-| Issue for PR B | none | | |
+| Issue for PR B: dapr/dapr-mcp-server#91 (opened 2026-10-16) | none | | |
 | PR B: `get_bulk_state` | `upstream-pr/get-bulk-state` | `upstream/main` at `f672ba8` | `bbf2f37`, `bc49bde` |
 | Issue: multi-app workflows and stateless HTTP | none (implementation lives on `rebase/upstream`: `65b34ef`, `9e448a1`) | | |
 
@@ -18,7 +18,7 @@ The PR bodies follow `.github/pull_request_template.md`. The checklists record w
 
 ## Issue for PR A: `[Feature]: workflow management tools`
 
-Template: Feature request. Open it before PR A and put its number in PR A's "Issue reference".
+Template: Feature request. Opened as dapr/dapr-mcp-server#90.
 
 **Area:** workflow
 
@@ -102,7 +102,7 @@ The PR has two commits so they can be reviewed separately:
 
 ## Issue reference
 
-Closes #<issue for PR A>
+Closes #90
 
 ## Checklist
 
@@ -126,7 +126,7 @@ Notes on the checklist:
 
 ## Issue for PR B: `[Feature]: get_bulk_state tool`
 
-Template: Feature request. Open it before PR B and put its number in PR B's "Issue reference".
+Template: Feature request. Opened as dapr/dapr-mcp-server#91.
 
 **Area:** state
 
@@ -187,7 +187,7 @@ The change is 6 files, +220/-6: `pkg/state/tools.go`, `pkg/state/tools_test.go`,
 
 ## Issue reference
 
-Closes #<issue for PR B>
+Closes #91
 
 ## Checklist
 
@@ -307,7 +307,7 @@ For stateless HTTP:
 - [x] Both branches rebased on `upstream/main` at `f672ba8` (dynamic component tools, #85) on 2026-10-16; `go test -race ./...`, `golangci-lint run ./...` and the linux/amd64 build pass. Rebase again if `upstream/main` moves before opening.
 - [ ] Expect a rebase between the two PRs. They touch four shared files: the `AGENTS.md` safety table row, `internal/toolkit/safety_table_test.go`, the README tool table and `cmd/dapr-mcp-server/components_test.go`. Whichever PR merges second has to be rebased on the first. A trial merge of the two branches (`git merge-tree`) reports conflicts in `AGENTS.md` and `components_test.go`, where both add entries to the same lines; the README table and the safety table test merge cleanly. The resolution is to keep the additions of both sides.
 - [x] Manual smoke run of PR A against Dapr 1.18.2 (2026-10-16): all ten tools, see the notes on PR A's checklist. Not covered: `terminate_workflow` on an instance with child workflows (the recursive default), and the multi-app layer on `rebase/upstream`.
-- [ ] Open the issue for each PR first (`CONTRIBUTING.md` asks for one) and replace `#<issue for PR A>` / `#<issue for PR B>` in the PR bodies with its number.
+- [x] Issues opened first, as `CONTRIBUTING.md` asks: #90 for PR A and #91 for PR B (2026-10-16). The PR bodies say `Closes #90` and `Closes #91`.
 - [ ] Decide whether to run the Python harness (`cd test && uv sync && uv run python app.py`, needs a running server and sidecar) before opening the PRs. It was not run for either branch, and the "integration tests" box is unchecked in both.
 - [ ] In PR A, replace the placeholder link to the proposal issue, and in the issue the link to PR A, once both exist.
 - [ ] Follow-up, not part of these PRs: tool-reference entries in `dapr/docs` for `get_bulk_state` and the ten workflow tools. The README rows already link to those anchors.
