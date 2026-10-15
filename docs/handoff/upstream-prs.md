@@ -77,7 +77,7 @@ Please make sure you've completed the relevant tasks for this PR, out of the fol
 
 Notes on the checklist:
 
-- Unit tests: `go test -race ./...` passes. `go test -cover ./pkg/workflow/`, measured locally on this branch, reports 92.5% of statements (CI has no coverage gate). The tests run against a mock client, not a sidecar; the tools have not been run against a real sidecar yet.
+- Unit tests: `go test -race ./...` passes. `go test -cover ./pkg/workflow/`, measured locally on this branch, reports 92.5% of statements (CI has no coverage gate). The unit tests run against a mock client; the manual run against a sidecar is in the next note.
 - Integration tests: I did not add any, and I did not run the Python harness under `test/` against this branch. I did run the branch by hand against Dapr 1.18.2 (`daprd` in slim mode, an in-memory actor state store, and a small Go workflow app with two activities and an external event). All ten tools behaved as described: start, status, pause and resume, raise event, history, rerun from a `taskScheduled` event with new activity input (the new instance completed), terminate, purge (rejected while the instance was running, accepted after terminate), and `list_workflows` paging with `limit` and `continuationToken`. The history showed IDs only on scheduling events and `executionCompleted`, with `task_scheduled_id` on `taskCompleted` and `taskFailed`.
 - `./scripts/check-gofmt.sh` is clean, and `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ./cmd/dapr-mcp-server` (the CI build, without its version flag) succeeds.
 ```
