@@ -4,13 +4,54 @@
 
 | Draft | Local branch | Base | Commits |
 | --- | --- | --- | --- |
-| PR A: workflow tools | `upstream-pr/workflow-tools` | `upstream/main` at `f672ba8` | `405cf2d`, `c94b934`, `9dfcf70` |
+| Issue for PR A | none | | |
+| PR A: workflow tools | `upstream-pr/workflow-tools` | `upstream/main` at `f672ba8` | `9441caf`, `5c8914f` |
+| Issue for PR B | none | | |
 | PR B: `get_bulk_state` | `upstream-pr/get-bulk-state` | `upstream/main` at `f672ba8` | `bbf2f37`, `bc49bde` |
 | Issue: multi-app workflows and stateless HTTP | none (implementation lives on `rebase/upstream`: `65b34ef`, `9e448a1`) | | |
 
-Open PR A first, then PR B. The two are independent in code, but the issue refers to PR A, and PR B is small enough to rebase once A has merged. They touch four of the same files, so PR B will need that rebase; see "Before submitting". PR A is single-app: it has no `appID` argument and only talks to the server's own sidecar. The multi-app feature and `--stateless` are not part of either PR; they are what the issue proposes.
+Order: the issue for PR A, then PR A, then the issue for PR B and PR B. The two are independent in code, but the issue refers to PR A, and PR B is small enough to rebase once A has merged. They touch four of the same files, so PR B will need that rebase; see "Before submitting". PR A is single-app: it has no `appID` argument and only talks to the server's own sidecar. The multi-app feature and `--stateless` are not part of either PR; they are what the issue proposes.
 
 The PR bodies follow `.github/pull_request_template.md`. The checklists record what was actually run; see "Before submitting" at the end for what is still open.
+
+---
+
+## Issue for PR A: `[Feature]: workflow management tools`
+
+Template: Feature request. Open it before PR A and put its number in PR A's "Issue reference".
+
+**Area:** workflow
+
+**Describe the feature**
+
+```markdown
+The server exposes most Dapr building blocks as tools, but not Dapr Workflow. An agent connected to the server cannot see which workflow instances exist, why one failed or is stuck, or act on it, even though these are common operator questions for long-running processes ("which orders are waiting for approval", "why did this one fail", "retry it from the failed step").
+
+I would like the server to offer tools to inspect and steer the workflow instances of the app its sidecar runs as: list instances, get the status and the event history of one, start one, raise an external event, pause and resume, rerun from an event in the history, terminate, and purge.
+```
+
+**Proposed approach**
+
+```markdown
+A `pkg/workflow` package in the same shape as the other tool packages (narrow client interface, `handler` with `toolkit.Instrumentation`, safety classes from the `AGENTS.md` table), using the `durabletask-go` workflow client over the gRPC connection the server already holds. Workflows are part of the runtime, not a component, so the tools are always registered, like `invoke` and `actors`. The terminate and purge tools are classed destructive and tell the agent to confirm with the user first.
+
+Scope is the server's own app: Dapr partitions workflows per app-id, so these tools see only the instances of the app the server's sidecar runs as. Reaching other apps' workflows is a separate question that I would raise on its own.
+
+I have an implementation ready and tested against Dapr 1.18.2, and will open it as a PR referencing this issue.
+```
+
+**Alternatives considered**
+
+```markdown
+- Calling the workflow HTTP API through `invoke_service`: the agent would have to know the Dapr API paths and has no structured history, and destructive calls would not carry the destructive annotations.
+- Read-only tools only: covers diagnosis, but not the common follow-up of retrying or unblocking an instance.
+```
+
+**Release note**
+
+```markdown
+Add workflow tools: list_workflows, get_workflow_status, get_workflow_history, start_workflow, raise_workflow_event, pause_workflow, resume_workflow, rerun_workflow, terminate_workflow and purge_workflow.
+```
 
 ---
 
@@ -54,15 +95,14 @@ Scope: only the server's own app is visible. Dapr partitions workflows per app-i
 
 Known runtime bug: a workflow history query (`GetInstanceHistory`) against a sidecar that has no actor state store configured made daprd hit a nil pointer dereference and exit, instead of returning an error. I reported this as dapr/dapr#10217, seen on Dapr 1.18.1, and it is fixed by dapr/dapr#10218, which is merged and shipped in Dapr 1.18.2 (backport dapr/dapr#10229). On a runtime without that fix, `get_workflow_history` can therefore take the sidecar down when the server's sidecar has no actor state store. This PR does not work around it.
 
-The PR has three commits so they can be reviewed separately:
+The PR has two commits so they can be reviewed separately:
 
 1. `feat(workflow): add read-only workflow tools`: the package, the client wiring, the mock and the three read-only tools.
 2. `feat(workflow): add tools to start, steer and purge workflows`: the seven mutating tools and the server-instruction line.
-3. `fix(workflow): rerunnable event ids, lean listing, clearer destructive tools`: the event ID handling, the listing without payloads, and the wording of the destructive tools, after a review against the `durabletask-go` client. It can be squashed into the first two.
 
 ## Issue reference
 
-None yet. I am happy to open an issue first if you prefer to discuss the tool set before reviewing code.
+Closes #<issue for PR A>
 
 ## Checklist
 
@@ -80,6 +120,41 @@ Notes on the checklist:
 - Unit tests: `go test -race ./...` passes. `go test -cover ./pkg/workflow/`, measured locally on this branch, reports 92.5% of statements (CI has no coverage gate). The unit tests run against a mock client; the manual run against a sidecar is in the next note.
 - Integration tests: I did not add any, and I did not run the Python harness under `test/` against this branch. I did run the branch by hand against Dapr 1.18.2 (`daprd` in slim mode, an in-memory actor state store, and a small Go workflow app with two activities and an external event). All ten tools behaved as described: start, status, pause and resume, raise event, history, rerun from a `taskScheduled` event with new activity input (the new instance completed), terminate, purge (rejected while the instance was running, accepted after terminate), and `list_workflows` paging with `limit` and `continuationToken`. The history showed IDs only on scheduling events and `executionCompleted`, with `task_scheduled_id` on `taskCompleted` and `taskFailed`.
 - `./scripts/check-gofmt.sh` is clean, and `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ./cmd/dapr-mcp-server` (the CI build, without its version flag) succeeds.
+```
+
+---
+
+## Issue for PR B: `[Feature]: get_bulk_state tool`
+
+Template: Feature request. Open it before PR B and put its number in PR B's "Issue reference".
+
+**Area:** state
+
+**Describe the feature**
+
+```markdown
+Reading several keys from a state store takes one `get_state` call per key. Agents that need a handful of related keys (for example an order and its line items) make many sequential tool calls for what Dapr supports as one bulk read. The secrets block already has this pair (`get_secret` and `get_bulk_secrets`); the state block does not.
+```
+
+**Proposed approach**
+
+```markdown
+A `get_bulk_state` tool next to `get_state`, backed by the SDK's `GetBulkState`. Arguments: `storeName`, `keys` and an optional `parallelism`. Each key gets its own result item with `found`, `value`, `etag` and, when that key failed, `error`, so one bad key does not fail the whole call. Classed `ReadOnly` like `get_state`, and removed together with the other state tools when the last state store goes.
+
+I have an implementation ready and will open it as a PR referencing this issue.
+```
+
+**Alternatives considered**
+
+```markdown
+- Keep one `get_state` call per key: works, but costs a round trip and a tool call per key.
+- Let `get_state` accept a list: changes the shape of an existing tool and its result.
+```
+
+**Release note**
+
+```markdown
+Add a get_bulk_state tool that reads several keys from a state store in one call.
 ```
 
 ---
@@ -112,7 +187,7 @@ The change is 6 files, +220/-6: `pkg/state/tools.go`, `pkg/state/tools_test.go`,
 
 ## Issue reference
 
-None yet. I am happy to open an issue first if you prefer to discuss the tool before reviewing code.
+Closes #<issue for PR B>
 
 ## Checklist
 
@@ -232,7 +307,7 @@ For stateless HTTP:
 - [x] Both branches rebased on `upstream/main` at `f672ba8` (dynamic component tools, #85) on 2026-10-16; `go test -race ./...`, `golangci-lint run ./...` and the linux/amd64 build pass. Rebase again if `upstream/main` moves before opening.
 - [ ] Expect a rebase between the two PRs. They touch four shared files: the `AGENTS.md` safety table row, `internal/toolkit/safety_table_test.go`, the README tool table and `cmd/dapr-mcp-server/components_test.go`. Whichever PR merges second has to be rebased on the first. A trial merge of the two branches (`git merge-tree`) reports conflicts in `AGENTS.md` and `components_test.go`, where both add entries to the same lines; the README table and the safety table test merge cleanly. The resolution is to keep the additions of both sides.
 - [x] Manual smoke run of PR A against Dapr 1.18.2 (2026-10-16): all ten tools, see the notes on PR A's checklist. Not covered: `terminate_workflow` on an instance with child workflows (the recursive default), and the multi-app layer on `rebase/upstream`.
-- [ ] Consider opening an issue before each PR. `CONTRIBUTING.md` recommends it ("Make sure there's an issue ... raised"), and the PR template asks for an issue number. Both PR bodies currently say "None yet".
+- [ ] Open the issue for each PR first (`CONTRIBUTING.md` asks for one) and replace `#<issue for PR A>` / `#<issue for PR B>` in the PR bodies with its number.
 - [ ] Decide whether to run the Python harness (`cd test && uv sync && uv run python app.py`, needs a running server and sidecar) before opening the PRs. It was not run for either branch, and the "integration tests" box is unchecked in both.
 - [ ] In PR A, replace the placeholder link to the proposal issue, and in the issue the link to PR A, once both exist.
 - [ ] Follow-up, not part of these PRs: tool-reference entries in `dapr/docs` for `get_bulk_state` and the ten workflow tools. The README rows already link to those anchors.
