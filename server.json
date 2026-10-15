@@ -1,0 +1,61 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.dapr/dapr-mcp-server",
+  "title": "Dapr MCP Server",
+  "description": "Dapr state, pub/sub, bindings, secrets, locks, crypto, conversation, actors, invocation as MCP tools",
+  "repository": {
+    "url": "https://github.com/dapr/dapr-mcp-server",
+    "source": "github"
+  },
+  "websiteUrl": "https://docs.dapr.io/developing-ai/mcp/dapr-mcp-server/",
+  "version": "0.0.0",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/dapr/dapr-mcp-server:latest",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "--no-healthcheck",
+          "description": "Skip the image's HTTP health check, which does not apply to stdio"
+        },
+        {
+          "type": "named",
+          "name": "--network",
+          "value": "host",
+          "description": "Reach the Dapr sidecar on the host. Docker Desktop needs host networking turned on in its settings"
+        }
+      ],
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "--http=",
+          "description": "Serve MCP over stdio instead of the image's default HTTP listener"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "DAPR_GRPC_PORT",
+          "description": "gRPC port of the Dapr sidecar",
+          "isRequired": true,
+          "format": "number",
+          "default": "50001"
+        },
+        {
+          "name": "DAPR_API_TOKEN",
+          "description": "Dapr API token, if the sidecar requires one",
+          "isSecret": true
+        },
+        {
+          "name": "DAPR_MCP_SERVER_LOG_LEVEL",
+          "description": "Log level, written as JSON to stderr",
+          "choices": ["debug", "info", "warn", "error"],
+          "default": "info"
+        }
+      ]
+    }
+  ]
+}

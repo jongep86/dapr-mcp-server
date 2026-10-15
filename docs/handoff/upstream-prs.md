@@ -4,8 +4,8 @@
 
 | Draft | Local branch | Base | Commits |
 | --- | --- | --- | --- |
-| PR B: `get_bulk_state` | `upstream-pr/get-bulk-state` | `upstream/main` at `506d935` | `6ba0127`, `47b650b` |
-| PR A: workflow tools | `upstream-pr/workflow-tools` | `upstream/main` at `506d935` | `b5de364`, `4ea2c71`, `56bc86c` |
+| PR B: `get_bulk_state` | `upstream-pr/get-bulk-state` | `upstream/main` at `f672ba8` | `bbf2f37`, `bc49bde` |
+| PR A: workflow tools | `upstream-pr/workflow-tools` | `upstream/main` at `f672ba8` | `405cf2d`, `c94b934`, `9dfcf70` |
 | Issue: multi-app workflows and stateless HTTP | none (implementation lives on `rebase/upstream`: `65b34ef`, `9e448a1`) | | |
 
 The two PRs are independent of each other and can be opened in either order. They do touch four of the same files, so the second one to merge needs a rebase; see "Before submitting". PR A is single-app: it has no `appID` argument and only talks to the server's own sidecar. The multi-app feature and `--stateless` are not part of either PR; they are what the issue proposes.
@@ -29,6 +29,7 @@ What the tool does:
 - Each returned item has `key`, `found`, `value` and `etag`. A key that failed carries `error` on its own item, so one bad key does not fail the whole call. Only a failure of the bulk call itself is reported as a tool error.
 - The text content starts with a summary line that separates what was asked from what was found, for example `Read 3 key(s) from state store 'statestore' (2 found):`, followed by the items as JSON.
 - Values are returned in the text content and in the structured result. They are never logged; `TestGetBulkStateValuesNotLogged` asserts this.
+- `get_bulk_state` is added to `state.ToolNames()`, so it is removed together with the other state tools when the last state store is unloaded.
 - As with `get_state`, `found` is derived from a non-empty value, so a key stored with an empty value reads as not found.
 
 Classification and docs:
@@ -37,7 +38,7 @@ Classification and docs:
 - `AGENTS.md` decision tree and the README tool table are updated.
 - The README row links to a `#get_bulk_state` anchor in the tool reference on docs.dapr.io. That entry does not exist yet. I will open a follow-up PR against `dapr/docs` once the tool's shape is agreed here.
 
-The change is 6 files, +219/-5: `pkg/state/tools.go`, `pkg/state/tools_test.go`, the safety table test, the expected tool list in `cmd/dapr-mcp-server/components_test.go`, `AGENTS.md` and `README.md`. No new dependencies.
+The change is 6 files, +220/-6: `pkg/state/tools.go`, `pkg/state/tools_test.go`, the safety table test, the expected tool list in `cmd/dapr-mcp-server/components_test.go`, `AGENTS.md` and `README.md`. No new dependencies.
 
 ## Issue reference
 
@@ -87,7 +88,7 @@ Adds a `pkg/workflow` package with ten tools to inspect and steer Dapr Workflow 
 
 Design notes:
 
-- **Always registered.** Workflows are part of the Dapr runtime, not a component, so there is no component type to gate on. The tools are registered next to `metadata`, `invoke` and `actors` in `registerTools`, and the README lists them as `Core`.
+- **Always registered.** Workflows are part of the Dapr runtime, not a component, so there is no component type to gate on. The tools are registered next to `metadata`, `invoke` and `actors` in `registerTools` (`toolsync.go`), outside the component sync, so they are never removed on a component reload. The package has no `ToolNames()` for the same reason, and the README lists the tools as `Core`.
 - **Client.** The tools use the `durabletask-go` workflow client over the gRPC connection the server already holds: `dtworkflow.NewClient(client.GrpcClientConn())`. No second connection is opened.
 - **Dependencies.** `github.com/dapr/durabletask-go` moves from the indirect to the direct `require` block at the version that was already resolved (`v0.12.2-0.20260720132056-79042da5fe61`). `google.golang.org/protobuf` moves to the direct block for the same reason, also at its existing version. No versions change and `go.sum` is untouched.
 - **Package shape.** Same as the other tool packages: a narrow `WorkflowClient` interface, a `handler` struct with `toolkit.Instrumentation`, `RegisterTools(server, client, metrics)`. The mock is `test/mocks/workflow_client_mock.go`.
@@ -228,7 +229,7 @@ For stateless HTTP:
 ## Before submitting
 
 - [x] `upstream-pr/get-bulk-state`, `upstream-pr/workflow-tools` and `rebase/upstream` are pushed to the fork `jongep86/dapr-mcp-server` (2026-10-13).
-- [ ] Rebase both branches if `upstream/main` has moved past `506d935`, and rerun `go test -race ./...` and `golangci-lint run ./...`.
+- [x] Both branches rebased on `upstream/main` at `f672ba8` (dynamic component tools, #85) on 2026-10-15; `go test -race ./...`, `golangci-lint run ./...` and the linux/amd64 build pass. Rebase again if `upstream/main` moves before opening.
 - [ ] Expect a rebase between the two PRs. They touch four shared files: the `AGENTS.md` safety table row, `internal/toolkit/safety_table_test.go`, the README tool table and `cmd/dapr-mcp-server/components_test.go`. Whichever PR merges second has to be rebased on the first. A trial merge of the two branches (`git merge-tree`) reports conflicts in `AGENTS.md` and `components_test.go`, where both add entries to the same lines; the README table and the safety table test merge cleanly. The resolution is to keep the additions of both sides.
 - [ ] Do one manual smoke run of PR A against a real sidecar before opening it. The Dapr CLI is not installed on the machine where this was built, so everything so far ran against mocks. With `dapr run` and a small workflow app: `start_workflow`, `get_workflow_status`, `get_workflow_history`, `rerun_workflow` from the `event_id` of a scheduling event, `pause_workflow` and `resume_workflow`, `raise_workflow_event`, `terminate_workflow`, `purge_workflow`. Check in particular that the history shows IDs the way PR A describes them, and that the rerun from a `taskScheduled` ID is accepted.
 - [ ] Consider opening an issue before each PR. `CONTRIBUTING.md` recommends it ("Make sure there's an issue ... raised"), and the PR template asks for an issue number. Both PR bodies currently say "None yet".

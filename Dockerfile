@@ -23,6 +23,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false \
 # Runtime stage - using distroless for security hardening
 FROM gcr.io/distroless/static-debian12:nonroot
 
+# Proves ownership of the image to the MCP Registry; must match the name in server.json
+LABEL io.modelcontextprotocol.server.name="io.github.dapr/dapr-mcp-server"
+
 # Copy the binary from builder
 COPY --from=builder /build/dapr-mcp-server /dapr-mcp-server
 
