@@ -162,7 +162,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	healthChecker := health.NewHandler(daprClient, Version, logger)
 
-	if err = registerTools(ctx, server, daprClient, wfClients, toolMetrics, logger); err != nil {
+	if _, err = registerTools(ctx, server, daprClient, wfClients, toolMetrics, logger); err != nil {
 		return fmt.Errorf("register tools: %w", err)
 	}
 	healthChecker.SetStartupDone(true)

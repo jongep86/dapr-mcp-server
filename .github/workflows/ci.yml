@@ -50,6 +50,36 @@ jobs:
       - name: Run tests
         run: go test -v -race ./...
 
+  server-json:
+    name: Validate server.json
+    runs-on: ubuntu-latest
+    env:
+      CHECK_JSONSCHEMA_VERSION: 0.38.2
+      # Bump together with "$schema" in server.json.
+      SERVER_JSON_SCHEMA: https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Validate against the MCP Registry schema
+        run: |
+          schema=$(jq -er '."$schema"' server.json)
+          if [[ "$schema" != "$SERVER_JSON_SCHEMA" ]]; then
+            echo "::error file=server.json::server.json names schema '$schema', but CI expects '$SERVER_JSON_SCHEMA'. Update both together."
+            exit 1
+          fi
+          pipx run --spec "check-jsonschema==${CHECK_JSONSCHEMA_VERSION}" check-jsonschema --schemafile "$SERVER_JSON_SCHEMA" server.json
+
+      - name: Check name matches the Dockerfile label
+        run: |
+          name=$(jq -er .name server.json)
+          label=$(sed -nE 's/^LABEL io\.modelcontextprotocol\.server\.name="([^"]+)"$/\1/p' Dockerfile)
+          if [[ "$name" != "$label" ]]; then
+            echo "::error file=server.json::server.json name '$name' does not match the Dockerfile io.modelcontextprotocol.server.name label '$label'."
+            exit 1
+          fi
+          echo "server.json name and Dockerfile label match: $name"
+
   build:
     name: Build
     runs-on: ubuntu-latest
