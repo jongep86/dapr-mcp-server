@@ -4,13 +4,83 @@
 
 | Draft | Local branch | Base | Commits |
 | --- | --- | --- | --- |
-| PR B: `get_bulk_state` | `upstream-pr/get-bulk-state` | `upstream/main` at `f672ba8` | `bbf2f37`, `bc49bde` |
 | PR A: workflow tools | `upstream-pr/workflow-tools` | `upstream/main` at `f672ba8` | `405cf2d`, `c94b934`, `9dfcf70` |
+| PR B: `get_bulk_state` | `upstream-pr/get-bulk-state` | `upstream/main` at `f672ba8` | `bbf2f37`, `bc49bde` |
 | Issue: multi-app workflows and stateless HTTP | none (implementation lives on `rebase/upstream`: `65b34ef`, `9e448a1`) | | |
 
-The two PRs are independent of each other and can be opened in either order. They do touch four of the same files, so the second one to merge needs a rebase; see "Before submitting". PR A is single-app: it has no `appID` argument and only talks to the server's own sidecar. The multi-app feature and `--stateless` are not part of either PR; they are what the issue proposes.
+Open PR A first, then PR B. The two are independent in code, but the issue refers to PR A, and PR B is small enough to rebase once A has merged. They touch four of the same files, so PR B will need that rebase; see "Before submitting". PR A is single-app: it has no `appID` argument and only talks to the server's own sidecar. The multi-app feature and `--stateless` are not part of either PR; they are what the issue proposes.
 
 The PR bodies follow `.github/pull_request_template.md`. The checklists record what was actually run; see "Before submitting" at the end for what is still open.
+
+---
+
+## PR A: `feat(workflow): add workflow management tools`
+
+Branch: `upstream-pr/workflow-tools`
+
+```markdown
+# Description
+
+Adds a `pkg/workflow` package with ten tools to inspect and steer Dapr Workflow instances.
+
+| Tool | What it does | Safety class | `AGENTS.md` row |
+| --- | --- | --- | --- |
+| `list_workflows` | Lists the app's instances with workflow name, status and creation time, plus counts per workflow and per status. Does not fetch inputs, outputs or custom status. `limit` defaults to 100 (max 500); pages with a continuation token. | `ReadOnly` | `read-only`, `idempotent` |
+| `get_workflow_status` | Runtime status of one instance with output, custom status and failure details. | `ReadOnly` | `read-only`, `idempotent` |
+| `get_workflow_history` | Event history of one instance. An `event_id` is reported only for events that have a sequence ID, which are mainly the scheduling events (`taskScheduled`, `timerCreated`, `childWorkflowInstanceCreated`); that is the ID `rerun_workflow` takes. Outcome events (`taskCompleted`, `taskFailed`, `timerFired` and the child workflow equivalents) have none and report the ID of their scheduling event as `task_scheduled_id` or `timer_id`. | `ReadOnly` | `read-only`, `idempotent` |
+| `start_workflow` | Starts an instance, immediately or at an RFC 3339 `startTime`. | `AdditiveWrite` | `not-idempotent`, `side-effect` |
+| `raise_workflow_event` | Delivers an external event to a waiting instance. | `AdditiveWrite` | `not-idempotent`, `side-effect` |
+| `rerun_workflow` | Reruns an instance from a scheduling event in its history as a new instance. | `AdditiveWrite` | `not-idempotent`, `side-effect` |
+| `pause_workflow` | Requests suspension of a running instance. | `IdempotentWrite` | `idempotent`, `side-effect` |
+| `resume_workflow` | Requests resumption of a suspended instance. | `IdempotentWrite` | `idempotent`, `side-effect` |
+| `terminate_workflow` | Terminates an instance without running its remaining steps. Recursive: the child workflows the instance started are terminated too (the `durabletask-go` client default). | `DestructiveIdempotent` | `destructive`, `idempotent` |
+| `purge_workflow` | Deletes the state and history of a finished instance. Not recursive: child workflows keep their state (the client leaves `Recursive` unset on the purge request). | `DestructiveWrite` | `destructive`, `not-idempotent`, `side-effect` |
+
+Design notes:
+
+- **Always registered.** Workflows are part of the Dapr runtime, not a component, so there is no component type to gate on. The tools are registered next to `metadata`, `invoke` and `actors` in `registerTools` (`toolsync.go`), outside the component sync, so they are never removed on a component reload. The package has no `ToolNames()` for the same reason, and the README lists the tools as `Core`.
+- **Client.** The tools use the `durabletask-go` workflow client over the gRPC connection the server already holds: `dtworkflow.NewClient(client.GrpcClientConn())`. No second connection is opened.
+- **Dependencies.** `github.com/dapr/durabletask-go` moves from the indirect to the direct `require` block at the version that was already resolved (`v0.12.2-0.20260720132056-79042da5fe61`). `google.golang.org/protobuf` moves to the direct block for the same reason, also at its existing version. No versions change and `go.sum` is untouched.
+- **Package shape.** Same as the other tool packages: a narrow `WorkflowClient` interface, a `handler` struct with `toolkit.Instrumentation`, `RegisterTools(server, client, metrics)`. The mock is `test/mocks/workflow_client_mock.go`.
+- **Payloads.** `input` and `eventData` are forwarded verbatim, because they are already JSON strings and the SDK helpers would encode them a second time. Payloads are not logged; the tests assert this for the `start_workflow` input, the `rerun_workflow` input and the `raise_workflow_event` data, on the success path and when Dapr returns an error.
+- **Event IDs.** In the `durabletask-go` history, most events carry event ID -1; a real sequence ID is mainly given to the events that schedule work. `get_workflow_history` therefore leaves a negative ID out instead of printing `#-1`, and shows the back-reference an outcome event carries (`taskScheduledId`, `timerId`), so a `taskFailed` can be traced to the activity that failed. `rerun_workflow` rejects a negative `eventID` with a hint to use the `event_id` of a scheduling event. Against Dapr 1.18.2, a rerun from `taskScheduled` and from `timerCreated` was accepted, and a rerun from `executionCompleted` was rejected by the sidecar with `NotFound: ... is not an event that can be rerun`, which the tool passes on. I did not test every event type, and the descriptions do not claim more than that.
+- **No status without a read.** `pause_workflow`, `resume_workflow` and `terminate_workflow` return `"requested": true` in the structured result. They do not report a status, because the tools do not read the state back.
+- **Optional IDs.** A whitespace-only `instanceID` on `start_workflow` or `newInstanceID` on `rerun_workflow` counts as omitted, so Dapr generates one.
+- **Listing.** `list_workflows` fetches the instance IDs and then the metadata of each instance, so a page of N instances costs N+1 sidecar calls. The metadata is fetched without payloads (`WithFetchPayloads(false)`), because the listing only reports name, status and creation time. An instance whose metadata cannot be fetched is left out and counted in a `warning` field. The tool does not filter; its description says so.
+- **Agent guidance.** The server instructions gain a line telling agents to take instance IDs from `start_workflow` or `list_workflows` and to confirm with the user before `terminate_workflow` or `purge_workflow` unless the user explicitly asked for it. The two destructive tool descriptions and the `AGENTS.md` decision tree state the same rule.
+- **Docs.** The `AGENTS.md` safety table and decision tree, `internal/toolkit/safety_table_test.go` and the README tool table are updated. The README rows link to anchors in the tool reference on docs.dapr.io that do not exist yet; I will open a follow-up PR against `dapr/docs`.
+
+Scope: only the server's own app is visible. Dapr partitions workflows per app-id, so these tools see and manage the instances of the app the server's sidecar runs as, and `start_workflow` can only start workflows registered by that app. The `list_workflows` description states this. Reaching the workflows of other apps is a separate question that I would like to raise as a proposal: <link to the issue below, once it exists>.
+
+Known runtime bug: a workflow history query (`GetInstanceHistory`) against a sidecar that has no actor state store configured made daprd hit a nil pointer dereference and exit, instead of returning an error. I reported this as dapr/dapr#10217, seen on Dapr 1.18.1, and it is fixed by dapr/dapr#10218, which is merged and shipped in Dapr 1.18.2 (backport dapr/dapr#10229). On a runtime without that fix, `get_workflow_history` can therefore take the sidecar down when the server's sidecar has no actor state store. This PR does not work around it.
+
+The PR has three commits so they can be reviewed separately:
+
+1. `feat(workflow): add read-only workflow tools`: the package, the client wiring, the mock and the three read-only tools.
+2. `feat(workflow): add tools to start, steer and purge workflows`: the seven mutating tools and the server-instruction line.
+3. `fix(workflow): rerunnable event ids, lean listing, clearer destructive tools`: the event ID handling, the listing without payloads, and the wording of the destructive tools, after a review against the `durabletask-go` client. It can be squashed into the first two.
+
+## Issue reference
+
+None yet. I am happy to open an issue first if you prefer to discuss the tool set before reviewing code.
+
+## Checklist
+
+Please make sure you've completed the relevant tasks for this PR, out of the following list:
+
+* [x] Code compiles correctly (`go build ./...`)
+* [x] Created / updated unit tests
+* [ ] Created / updated integration tests (under `test/`)
+* [x] Linter passes (`golangci-lint run ./...`)
+* [x] Commits are signed off per the [DCO](../CONTRIBUTING.md#developer-certificate-of-origin-signing-your-work)
+* [x] Updated documentation (README, code comments, or examples)
+
+Notes on the checklist:
+
+- Unit tests: `go test -race ./...` passes. `go test -cover ./pkg/workflow/`, measured locally on this branch, reports 92.5% of statements (CI has no coverage gate). The tests run against a mock client, not a sidecar; the tools have not been run against a real sidecar yet.
+- Integration tests: I did not add any, and I did not run the Python harness under `test/` against this branch. I did run the branch by hand against Dapr 1.18.2 (`daprd` in slim mode, an in-memory actor state store, and a small Go workflow app with two activities and an external event). All ten tools behaved as described: start, status, pause and resume, raise event, history, rerun from a `taskScheduled` event with new activity input (the new instance completed), terminate, purge (rejected while the instance was running, accepted after terminate), and `list_workflows` paging with `limit` and `continuationToken`. The history showed IDs only on scheduling events and `executionCompleted`, with `task_scheduled_id` on `taskCompleted` and `taskFailed`.
+- `./scripts/check-gofmt.sh` is clean, and `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ./cmd/dapr-mcp-server` (the CI build, without its version flag) succeeds.
+```
 
 ---
 
@@ -58,76 +128,6 @@ Please make sure you've completed the relevant tasks for this PR, out of the fol
 Notes on the checklist:
 
 - Unit tests: `go test -race ./...` passes. `TestGetBulkStateTool` covers the happy path with a key that is not found, a per-key error, a Dapr failure, a missing `storeName`, empty `keys`, a blank key and negative `parallelism`. It asserts the summary line and the structured result (`store_name`, and `key`, `found`, `value`, `etag` and `error` per item).
-- Integration tests: I did not add any, and I did not run the Python harness under `test/` against this branch.
-- `./scripts/check-gofmt.sh` is clean, and `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ./cmd/dapr-mcp-server` (the CI build, without its version flag) succeeds.
-```
-
----
-
-## PR A: `feat(workflow): add workflow management tools`
-
-Branch: `upstream-pr/workflow-tools`
-
-```markdown
-# Description
-
-Adds a `pkg/workflow` package with ten tools to inspect and steer Dapr Workflow instances.
-
-| Tool | What it does | Safety class | `AGENTS.md` row |
-| --- | --- | --- | --- |
-| `list_workflows` | Lists the app's instances with workflow name, status and creation time, plus counts per workflow and per status. Does not fetch inputs, outputs or custom status. `limit` defaults to 100 (max 500); pages with a continuation token. | `ReadOnly` | `read-only`, `idempotent` |
-| `get_workflow_status` | Runtime status of one instance with output, custom status and failure details. | `ReadOnly` | `read-only`, `idempotent` |
-| `get_workflow_history` | Event history of one instance. An `event_id` is reported only for events that have a sequence ID, which are mainly the scheduling events (`taskScheduled`, `timerCreated`, `childWorkflowInstanceCreated`); that is the ID `rerun_workflow` takes. Outcome events (`taskCompleted`, `taskFailed`, `timerFired` and the child workflow equivalents) have none and report the ID of their scheduling event as `task_scheduled_id` or `timer_id`. | `ReadOnly` | `read-only`, `idempotent` |
-| `start_workflow` | Starts an instance, immediately or at an RFC 3339 `startTime`. | `AdditiveWrite` | `not-idempotent`, `side-effect` |
-| `raise_workflow_event` | Delivers an external event to a waiting instance. | `AdditiveWrite` | `not-idempotent`, `side-effect` |
-| `rerun_workflow` | Reruns an instance from a scheduling event in its history as a new instance. | `AdditiveWrite` | `not-idempotent`, `side-effect` |
-| `pause_workflow` | Requests suspension of a running instance. | `IdempotentWrite` | `idempotent`, `side-effect` |
-| `resume_workflow` | Requests resumption of a suspended instance. | `IdempotentWrite` | `idempotent`, `side-effect` |
-| `terminate_workflow` | Terminates an instance without running its remaining steps. Recursive: the child workflows the instance started are terminated too (the `durabletask-go` client default). | `DestructiveIdempotent` | `destructive`, `idempotent` |
-| `purge_workflow` | Deletes the state and history of a finished instance. Not recursive: child workflows keep their state (the client leaves `Recursive` unset on the purge request). | `DestructiveWrite` | `destructive`, `not-idempotent`, `side-effect` |
-
-Design notes:
-
-- **Always registered.** Workflows are part of the Dapr runtime, not a component, so there is no component type to gate on. The tools are registered next to `metadata`, `invoke` and `actors` in `registerTools` (`toolsync.go`), outside the component sync, so they are never removed on a component reload. The package has no `ToolNames()` for the same reason, and the README lists the tools as `Core`.
-- **Client.** The tools use the `durabletask-go` workflow client over the gRPC connection the server already holds: `dtworkflow.NewClient(client.GrpcClientConn())`. No second connection is opened.
-- **Dependencies.** `github.com/dapr/durabletask-go` moves from the indirect to the direct `require` block at the version that was already resolved (`v0.12.2-0.20260720132056-79042da5fe61`). `google.golang.org/protobuf` moves to the direct block for the same reason, also at its existing version. No versions change and `go.sum` is untouched.
-- **Package shape.** Same as the other tool packages: a narrow `WorkflowClient` interface, a `handler` struct with `toolkit.Instrumentation`, `RegisterTools(server, client, metrics)`. The mock is `test/mocks/workflow_client_mock.go`.
-- **Payloads.** `input` and `eventData` are forwarded verbatim, because they are already JSON strings and the SDK helpers would encode them a second time. Payloads are not logged; the tests assert this for the `start_workflow` input, the `rerun_workflow` input and the `raise_workflow_event` data, on the success path and when Dapr returns an error.
-- **Event IDs.** In the `durabletask-go` history, most events carry event ID -1; a real sequence ID is mainly given to the events that schedule work. `get_workflow_history` therefore leaves a negative ID out instead of printing `#-1`, and shows the back-reference an outcome event carries (`taskScheduledId`, `timerId`), so a `taskFailed` can be traced to the activity that failed. `rerun_workflow` rejects a negative `eventID` with a hint to use the `event_id` of a scheduling event. I did not verify against a sidecar which event types the runtime accepts as a rerun starting point, and the descriptions do not claim more than that.
-- **No status without a read.** `pause_workflow`, `resume_workflow` and `terminate_workflow` return `"requested": true` in the structured result. They do not report a status, because the tools do not read the state back.
-- **Optional IDs.** A whitespace-only `instanceID` on `start_workflow` or `newInstanceID` on `rerun_workflow` counts as omitted, so Dapr generates one.
-- **Listing.** `list_workflows` fetches the instance IDs and then the metadata of each instance, so a page of N instances costs N+1 sidecar calls. The metadata is fetched without payloads (`WithFetchPayloads(false)`), because the listing only reports name, status and creation time. An instance whose metadata cannot be fetched is left out and counted in a `warning` field. The tool does not filter; its description says so.
-- **Agent guidance.** The server instructions gain a line telling agents to take instance IDs from `start_workflow` or `list_workflows` and to confirm with the user before `terminate_workflow` or `purge_workflow` unless the user explicitly asked for it. The two destructive tool descriptions and the `AGENTS.md` decision tree state the same rule.
-- **Docs.** The `AGENTS.md` safety table and decision tree, `internal/toolkit/safety_table_test.go` and the README tool table are updated. The README rows link to anchors in the tool reference on docs.dapr.io that do not exist yet; I will open a follow-up PR against `dapr/docs`.
-
-Scope: only the server's own app is visible. Dapr partitions workflows per app-id, so these tools see and manage the instances of the app the server's sidecar runs as, and `start_workflow` can only start workflows registered by that app. The `list_workflows` description states this. Reaching the workflows of other apps is a separate question that I would like to raise as a proposal: <link to the issue below, once it exists>.
-
-Known runtime bug: a workflow history query (`GetInstanceHistory`) against a sidecar that has no actor state store configured made daprd hit a nil pointer dereference and exit, instead of returning an error. I reported this as dapr/dapr#10217, seen on Dapr 1.18.1, and it is fixed by dapr/dapr#10218, which is merged and shipped in Dapr 1.18.2 (backport dapr/dapr#10229). On a runtime without that fix, `get_workflow_history` can therefore take the sidecar down when the server's sidecar has no actor state store. This PR does not work around it.
-
-The PR has three commits so they can be reviewed separately:
-
-1. `feat(workflow): add read-only workflow tools`: the package, the client wiring, the mock and the three read-only tools.
-2. `feat(workflow): add tools to start, steer and purge workflows`: the seven mutating tools and the server-instruction line.
-3. `fix(workflow): rerunnable event ids, lean listing, clearer destructive tools`: the event ID handling, the listing without payloads, and the wording of the destructive tools, after a review against the `durabletask-go` client. It can be squashed into the first two.
-
-## Issue reference
-
-None yet. I am happy to open an issue first if you prefer to discuss the tool set before reviewing code.
-
-## Checklist
-
-Please make sure you've completed the relevant tasks for this PR, out of the following list:
-
-* [x] Code compiles correctly (`go build ./...`)
-* [x] Created / updated unit tests
-* [ ] Created / updated integration tests (under `test/`)
-* [x] Linter passes (`golangci-lint run ./...`)
-* [x] Commits are signed off per the [DCO](../CONTRIBUTING.md#developer-certificate-of-origin-signing-your-work)
-* [x] Updated documentation (README, code comments, or examples)
-
-Notes on the checklist:
-
-- Unit tests: `go test -race ./...` passes. `go test -cover ./pkg/workflow/`, measured locally on this branch, reports 92.5% of statements (CI has no coverage gate). The tests run against a mock client, not a sidecar; the tools have not been run against a real sidecar yet.
 - Integration tests: I did not add any, and I did not run the Python harness under `test/` against this branch.
 - `./scripts/check-gofmt.sh` is clean, and `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ./cmd/dapr-mcp-server` (the CI build, without its version flag) succeeds.
 ```
@@ -229,9 +229,9 @@ For stateless HTTP:
 ## Before submitting
 
 - [x] `upstream-pr/get-bulk-state`, `upstream-pr/workflow-tools` and `rebase/upstream` are pushed to the fork `jongep86/dapr-mcp-server` (2026-10-13).
-- [x] Both branches rebased on `upstream/main` at `f672ba8` (dynamic component tools, #85) on 2026-10-15; `go test -race ./...`, `golangci-lint run ./...` and the linux/amd64 build pass. Rebase again if `upstream/main` moves before opening.
+- [x] Both branches rebased on `upstream/main` at `f672ba8` (dynamic component tools, #85) on 2026-10-16; `go test -race ./...`, `golangci-lint run ./...` and the linux/amd64 build pass. Rebase again if `upstream/main` moves before opening.
 - [ ] Expect a rebase between the two PRs. They touch four shared files: the `AGENTS.md` safety table row, `internal/toolkit/safety_table_test.go`, the README tool table and `cmd/dapr-mcp-server/components_test.go`. Whichever PR merges second has to be rebased on the first. A trial merge of the two branches (`git merge-tree`) reports conflicts in `AGENTS.md` and `components_test.go`, where both add entries to the same lines; the README table and the safety table test merge cleanly. The resolution is to keep the additions of both sides.
-- [ ] Do one manual smoke run of PR A against a real sidecar before opening it. The Dapr CLI is not installed on the machine where this was built, so everything so far ran against mocks. With `dapr run` and a small workflow app: `start_workflow`, `get_workflow_status`, `get_workflow_history`, `rerun_workflow` from the `event_id` of a scheduling event, `pause_workflow` and `resume_workflow`, `raise_workflow_event`, `terminate_workflow`, `purge_workflow`. Check in particular that the history shows IDs the way PR A describes them, and that the rerun from a `taskScheduled` ID is accepted.
+- [x] Manual smoke run of PR A against Dapr 1.18.2 (2026-10-16): all ten tools, see the notes on PR A's checklist. Not covered: `terminate_workflow` on an instance with child workflows (the recursive default), and the multi-app layer on `rebase/upstream`.
 - [ ] Consider opening an issue before each PR. `CONTRIBUTING.md` recommends it ("Make sure there's an issue ... raised"), and the PR template asks for an issue number. Both PR bodies currently say "None yet".
 - [ ] Decide whether to run the Python harness (`cd test && uv sync && uv run python app.py`, needs a running server and sidecar) before opening the PRs. It was not run for either branch, and the "integration tests" box is unchecked in both.
 - [ ] In PR A, replace the placeholder link to the proposal issue, and in the issue the link to PR A, once both exist.
