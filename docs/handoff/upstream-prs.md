@@ -1,6 +1,6 @@
 # Upstream PR and issue drafts
 
-**Opened so far on `dapr/dapr-mcp-server`: issues #90 and #91. No pull request and no comment yet.** The branches are pushed to the fork `jongep86/dapr-mcp-server`. The texts below are meant to be copied into GitHub by hand.
+**Opened on `dapr/dapr-mcp-server` (2026-10-16): issues #90 and #91, PR A as #92 and PR B as #93. The multi-app proposal is not opened yet.** The branches are pushed to the fork `jongep86/dapr-mcp-server`. The texts below are meant to be copied into GitHub by hand.
 
 | Draft | Local branch | Base | Commits |
 | --- | --- | --- | --- |
