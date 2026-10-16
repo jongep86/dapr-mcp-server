@@ -380,6 +380,36 @@ func TestListWorkflowsSkipsUnfetchableInstances(t *testing.T) {
 	assert.Equal(t, map[string]string{"mcp-server": "metadata of 1 instance(s) could not be fetched; they are missing"}, s["warnings"])
 }
 
+func TestListWorkflowsFailsWhenEveryLookupFails(t *testing.T) {
+	t.Parallel()
+	h, client, _ := newTestHandler(t)
+	client.On("ListInstanceIDs", mock.Anything, mock.Anything).Return(idList("", "o-1", "o-2"), nil)
+	client.On("FetchWorkflowMetadata", mock.Anything, mock.Anything, fetchesPayloads(false)).Return(nil, errors.New("unavailable"))
+
+	result, _, err := h.listWorkflows(context.Background(), &mcp.CallToolRequest{}, ListWorkflowsArgs{})
+
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, text(t, result), "metadata of all 2 instance(s) on the page could not be fetched: unavailable")
+}
+
+func TestListWorkflowsFailsWhenContextIsCancelled(t *testing.T) {
+	t.Parallel()
+	h, client, _ := newTestHandler(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	client.On("ListInstanceIDs", mock.Anything, mock.Anything).Return(idList("", "o-1", "o-2"), nil)
+	client.On("FetchWorkflowMetadata", mock.Anything, "o-1", fetchesPayloads(false)).
+		Return(metadata("o-1", "order", protos.OrchestrationStatus_ORCHESTRATION_STATUS_RUNNING), nil).
+		Run(func(mock.Arguments) { cancel() })
+	client.On("FetchWorkflowMetadata", mock.Anything, "o-2", fetchesPayloads(false)).Return(nil, context.Canceled)
+
+	result, _, err := h.listWorkflows(ctx, &mcp.CallToolRequest{}, ListWorkflowsArgs{})
+
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, text(t, result), `fetch metadata of instance "o-2": context canceled`)
+}
+
 func TestStartWorkflowSendsRawInputAndDoesNotLogIt(t *testing.T) {
 	t.Parallel()
 	h, client, logs := newTestHandler(t)
@@ -633,7 +663,7 @@ func TestInstanceActionTools(t *testing.T) {
 			call: func(h *handler) (*mcp.CallToolResult, any, error) {
 				return h.pauseWorkflow(context.Background(), &mcp.CallToolRequest{}, ReasonArgs{InstanceID: "order-1", Reason: "maintenance"})
 			},
-			wantText: "Successfully paused workflow instance 'order-1' on app 'mcp-server'.", wantKey: "requested",
+			wantText: "Successfully requested suspension of workflow instance 'order-1' on app 'mcp-server'.", wantKey: "requested",
 			wantFail: `pause workflow instance "order-1" on app "mcp-server": boom`,
 		},
 		{
@@ -641,7 +671,7 @@ func TestInstanceActionTools(t *testing.T) {
 			call: func(h *handler) (*mcp.CallToolResult, any, error) {
 				return h.resumeWorkflow(context.Background(), &mcp.CallToolRequest{}, ReasonArgs{InstanceID: "order-1"})
 			},
-			wantText: "Successfully resumed workflow instance 'order-1' on app 'mcp-server'.", wantKey: "requested",
+			wantText: "Successfully requested resumption of workflow instance 'order-1' on app 'mcp-server'.", wantKey: "requested",
 			wantFail: `resume workflow instance "order-1" on app "mcp-server": boom`,
 		},
 		{

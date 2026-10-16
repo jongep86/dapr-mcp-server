@@ -337,11 +337,18 @@ func listInstances(ctx context.Context, t target, pageSize uint32, continuationT
 	pr := (*protos.ListInstanceIDsResponse)(resp)
 	l.instances = make([]instanceSummary, 0, len(pr.GetInstanceIds()))
 	l.continuationToken = pr.GetContinuationToken()
+	var lastErr error
 	for _, id := range pr.GetInstanceIds() {
 		// The listing only reports name, status and creation time: do not make
 		// the sidecar load every instance's input, output and custom status.
 		meta, err := t.client.FetchWorkflowMetadata(ctx, id, wf.WithFetchPayloads(false))
 		if err != nil {
+			// A canceled or timed-out request is not a missing instance:
+			// fail rather than report a short list as complete.
+			if ctx.Err() != nil {
+				return listing{appID: t.appID, err: fmt.Errorf("fetch metadata of instance %q: %w", id, ctx.Err())}
+			}
+			lastErr = err
 			l.skipped++
 			continue
 		}
@@ -356,6 +363,12 @@ func listInstances(ctx context.Context, t target, pageSize uint32, continuationT
 			instance.CreatedAt = formatTime(pm.GetCreatedAt())
 		}
 		l.instances = append(l.instances, instance)
+	}
+	// Only an instance that went missing between the listing and the lookup,
+	// such as one purged in between, counts as skipped. When every lookup on
+	// the page failed, the sidecar is the likelier cause.
+	if l.skipped > 0 && len(l.instances) == 0 {
+		return listing{appID: t.appID, err: fmt.Errorf("metadata of all %d instance(s) on the page could not be fetched: %w", l.skipped, lastErr)}
 	}
 	return l
 }
@@ -615,7 +628,7 @@ func (h *handler) pauseWorkflow(ctx context.Context, _ *mcp.CallToolRequest, arg
 		return call.Fail(fmt.Errorf("pause workflow instance %q on app %q: %w", args.InstanceID, t.appID, err)), nil, nil
 	}
 	call.Succeed("app_id", t.appID, "instance_id", args.InstanceID)
-	text := fmt.Sprintf("Successfully paused workflow instance '%s' on app '%s'.", args.InstanceID, t.appID)
+	text := fmt.Sprintf("Successfully requested suspension of workflow instance '%s' on app '%s'.", args.InstanceID, t.appID)
 	return toolkit.TextResult(text), map[string]any{"app_id": t.appID, "instance_id": args.InstanceID, "requested": true}, nil
 }
 
@@ -629,7 +642,7 @@ func (h *handler) resumeWorkflow(ctx context.Context, _ *mcp.CallToolRequest, ar
 		return call.Fail(fmt.Errorf("resume workflow instance %q on app %q: %w", args.InstanceID, t.appID, err)), nil, nil
 	}
 	call.Succeed("app_id", t.appID, "instance_id", args.InstanceID)
-	text := fmt.Sprintf("Successfully resumed workflow instance '%s' on app '%s'.", args.InstanceID, t.appID)
+	text := fmt.Sprintf("Successfully requested resumption of workflow instance '%s' on app '%s'.", args.InstanceID, t.appID)
 	return toolkit.TextResult(text), map[string]any{"app_id": t.appID, "instance_id": args.InstanceID, "requested": true}, nil
 }
 
